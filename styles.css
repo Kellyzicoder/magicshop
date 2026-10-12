@@ -964,3 +964,15 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
 select[hidden] { display: none; }
 .layer .name .ab-tag { margin-left: 8px; padding: 1px 6px; border-radius: 6px; font-size: 10px; color: var(--muted); border: 1px solid var(--border); white-space: nowrap; }
 .rail-btn[hidden] { display: none; }
+
+/* v0.6: floating tab windows */
+.tabs { grid-template-columns: repeat(auto-fit, minmax(0, 1fr)); }
+.tab[hidden] { display: none; }
+.tab-window {
+  position: fixed; width: 320px; height: 520px; min-width: 240px; min-height: 160px;
+  display: flex; flex-direction: column; resize: both; overflow: hidden;
+  background: var(--surface-solid); border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--shadow);
+}
+.tw-head { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px 8px 14px; cursor: grab; border-bottom: 1px solid var(--border); user-select: none; }
+.tw-title { font-weight: 600; font-size: 13px; }
+.tab-window .tab-body { overflow: auto; }

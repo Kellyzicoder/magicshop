@@ -2385,10 +2385,84 @@
     document.querySelectorAll('.rail-btn[data-tab]').forEach((b) => {
       b.classList.toggle('active', b.dataset.tab === name);
     });
-    $('tab-layers').hidden = name !== 'layers';
-    $('tab-design').hidden = name !== 'design';
-    $('tab-raw').hidden = name !== 'raw';
+    for (const n of ['layers', 'design', 'raw']) $('tab-' + n).hidden = !floating.has(n) && n !== name;
   }
+
+  // ----- Detachable tabs: drag a tab out to make it a floating window; "Dock" puts it back -----
+
+  const floating = new Map(); // tab name -> window element
+  const TAB_TITLES = { layers: 'Layers', design: 'Design', raw: 'Camera Raw' };
+  let floatZ = 20;
+
+  function detachTab(name, x, y) {
+    if (floating.has(name)) return;
+    const body = $('tab-' + name);
+    const win = el('div', 'tab-window');
+    const head = el('div', 'tw-head');
+    head.append(el('span', 'tw-title', TAB_TITLES[name]));
+    const dock = el('button', 'btn btn-small', 'Dock');
+    dock.type = 'button';
+    dock.title = 'Put this tab back in the side panel';
+    dock.addEventListener('click', () => dockTab(name));
+    head.append(dock);
+    win.append(head, body);
+    win.style.left = clamp(x, 8, window.innerWidth - 300) + 'px';
+    win.style.top = clamp(y, 8, window.innerHeight - 200) + 'px';
+    win.style.zIndex = String(++floatZ);
+    document.body.append(win);
+    floating.set(name, win);
+    document.querySelector('.tab[data-tab="' + name + '"]').hidden = true;
+    win.addEventListener('pointerdown', () => { win.style.zIndex = String(++floatZ); });
+    head.addEventListener('pointerdown', (e) => {
+      if (e.target.closest('button')) return;
+      e.preventDefault();
+      const ox = e.clientX - win.offsetLeft, oy = e.clientY - win.offsetTop;
+      head.setPointerCapture(e.pointerId);
+      const move = (ev) => {
+        win.style.left = clamp(ev.clientX - ox, 0, window.innerWidth - 80) + 'px';
+        win.style.top = clamp(ev.clientY - oy, 0, window.innerHeight - 40) + 'px';
+      };
+      const up = () => { head.removeEventListener('pointermove', move); head.removeEventListener('pointerup', up); };
+      head.addEventListener('pointermove', move);
+      head.addEventListener('pointerup', up);
+    });
+    if (activeTab === name) {
+      const next = ['layers', 'design', 'raw'].find((n) => !floating.has(n));
+      if (next) activeTab = next;
+    }
+    setTab(activeTab);
+  }
+
+  function dockTab(name) {
+    const win = floating.get(name);
+    if (!win) return;
+    const body = $('tab-' + name);
+    document.querySelector('.panel').append(body);
+    win.remove();
+    floating.delete(name);
+    document.querySelector('.tab[data-tab="' + name + '"]').hidden = false;
+    setTab(name);
+  }
+
+  document.querySelectorAll('.tab').forEach((t) => {
+    t.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      const sx = e.clientX, sy = e.clientY;
+      const move = (ev) => {
+        if (Math.hypot(ev.clientX - sx, ev.clientY - sy) < 40) return;
+        cleanup();
+        detachTab(t.dataset.tab, ev.clientX - 140, ev.clientY - 14);
+      };
+      const cleanup = () => {
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', cleanup);
+      };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', cleanup);
+    });
+    t.addEventListener('dblclick', () => detachTab(t.dataset.tab, window.innerWidth - 380, 90));
+    t.title = 'Drag out (or double-click) to make this tab a floating window';
+  });
 
   document.querySelectorAll('[data-tab]').forEach((el2) => {
     el2.addEventListener('click', () => setTab(el2.dataset.tab));
