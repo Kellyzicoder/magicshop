@@ -52,6 +52,10 @@
       </div>
 
       <div class="group">
+        <select id="export-scope" aria-label="Which artboards to download" hidden>
+          <option value="current">This artboard</option>
+          <option value="all">All artboards (zip)</option>
+        </select>
         <select id="export-format" aria-label="Export format">
           <option value="png">PNG</option>
           <option value="jpeg">JPG</option>
@@ -103,6 +107,10 @@
 
       <div class="rail-divider"></div>
 
+      <button type="button" class="rail-btn" data-tool="artboard" id="rail-artboard" hidden title="Artboards (A)" aria-label="Artboard tool">
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 3v18M17 3v18M3 7h18M3 17h18"/></svg>
+      </button>
+
       <button type="button" class="rail-btn" data-tool="warp" title="Skew, perspective, distort (D)" aria-label="Distort tool">
         <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7l5-3 13 2-3 13-14 1z"/><circle cx="3" cy="7" r="1.2" fill="currentColor"/><circle cx="8" cy="4" r="1.2" fill="currentColor"/><circle cx="21" cy="6" r="1.2" fill="currentColor"/><circle cx="18" cy="19" r="1.2" fill="currentColor"/><circle cx="4" cy="20" r="1.2" fill="currentColor"/></svg>
       </button>
@@ -127,7 +135,7 @@
       </button>
 
       <div class="rail-spacer"></div>
-      <div class="version">Version 0.5</div>
+      <div class="version">Version 0.6</div>
     </nav>
 
     <!-- ===== Canvas area (rulers + workspace) ===== -->
@@ -147,6 +155,7 @@
         </div>
 
         <div id="tool-options" class="tool-options"></div>
+        <div id="float-bar" class="float-bar" hidden></div>
 
         <div id="hint" class="hint">Drop an image here, or press “Open image”</div>
 
@@ -264,6 +273,10 @@
         <label class="check">
           <input id="new-transparent" type="checkbox">
           Transparent background
+        </label>
+        <label class="check">
+          <input id="new-artboards" type="checkbox">
+          Artboards (several pages on one canvas)
         </label>
       </div>
 
