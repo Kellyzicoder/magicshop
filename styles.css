@@ -912,3 +912,13 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
 }
 .font-list button:hover { background: var(--accent-soft); }
 .font-list .empty { padding: 12px; color: var(--muted); }
+
+/* ---------- v0.5: blend row, painting tools ---------- */
+.blend-row { grid-template-columns: auto 1fr; align-items: center; }
+.blend-row select { width: 100%; }
+.workspace[data-tool="brush"] canvas, .workspace[data-tool="eraser"] canvas { cursor: none; }
+.workspace[data-tool="crop"] canvas, .workspace[data-tool="gradient"] canvas, .workspace[data-tool="bucket"] canvas,
+.workspace[data-tool="eyedropper"] canvas, .workspace[data-tool="warp"] canvas { cursor: crosshair; }
+.tool-options input[type="range"] { width: 90px; }
+.tool-options .swatches { display: inline-flex; align-items: center; gap: 4px; }
+.tool-options input[type="color"] { width: 30px; height: 26px; padding: 0; border: 1px solid var(--border); border-radius: 6px; background: none; cursor: pointer; }

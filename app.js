@@ -39,6 +39,7 @@
   const layerList = $('layer-list');
   const opacity = $('opacity');
   const opacityOut = $('opacity-out');
+  const blendSelect = $('blend');
   const zoomSlider = $('zoom-slider');
   const zoomLabel = $('zoom-label');
   const docSize = $('doc-size');
@@ -145,15 +146,60 @@
     { value: 'ellipse', label: 'Ellipse' },
     { value: 'triangle', label: 'Triangle' },
     { value: 'star', label: 'Star' },
+    { value: 'diamond', label: 'Diamond' },
+    { value: 'pentagon', label: 'Pentagon' },
+    { value: 'hexagon', label: 'Hexagon' },
+    { value: 'heart', label: 'Heart' },
+    { value: 'arrow', label: 'Arrow' },
+    { value: 'plus', label: 'Plus' },
+    { value: 'bubble', label: 'Speech bubble' },
+    { value: 'line', label: 'Line' },
+  ];
+
+  // Blend modes a layer can use (the value is the browser's own name for it).
+  const BLENDS = [
+    { value: 'normal', label: 'Normal' },
+    { value: 'multiply', label: 'Multiply' },
+    { value: 'screen', label: 'Screen' },
+    { value: 'overlay', label: 'Overlay' },
+    { value: 'soft-light', label: 'Soft light' },
+    { value: 'hard-light', label: 'Hard light' },
+    { value: 'darken', label: 'Darken' },
+    { value: 'lighten', label: 'Lighten' },
+    { value: 'color-dodge', label: 'Color dodge' },
+    { value: 'color-burn', label: 'Color burn' },
+    { value: 'difference', label: 'Difference' },
+    { value: 'exclusion', label: 'Exclusion' },
+    { value: 'hue', label: 'Hue' },
+    { value: 'saturation', label: 'Saturation' },
+    { value: 'color', label: 'Color' },
+    { value: 'luminosity', label: 'Luminosity' },
   ];
 
   // What a new text / shape / path starts with. The options bar changes these.
   const defaults = {
     text: { font: FONTS[0].family, size: 72, weight: 400, italic: false, color: '#111111', align: 'left',
       letterSpacing: 0, lineHeight: 1.2, underline: false, strike: false, caps: false },
-    shape: { shape: 'rect', fill: '#5b8cff', stroke: '', strokeWidth: 4, radius: 0 },
-    path: { fill: '', stroke: '#111111', strokeWidth: 4 },
+    shape: { shape: 'rect', fill: '#5b8cff', stroke: '', strokeWidth: 4, radius: 0, dash: 'solid',
+      gkind: '', gc1: '#ff7a59', gc2: '#5b8cff', gangle: 90, gfade: false },
+    path: { fill: '', stroke: '#111111', strokeWidth: 4, dash: 'solid',
+      gkind: '', gc1: '#ff7a59', gc2: '#5b8cff', gangle: 90, gfade: false },
   };
+
+  // Colors and options for the painting tools.
+  const paint = { fg: '#111111', bg: '#ffffff' };
+  const brushOpts = { brush: { size: 40, hardness: 60, opacity: 100 }, eraser: { size: 60, hardness: 90, opacity: 100 } };
+  const bucketOpts = { tolerance: 32, contiguous: true, opacity: 100 };
+  const gradientOpts = { kind: 'linear', fade: false };
+  const CROP_RATIOS = [
+    { value: 'free', label: 'Free' },
+    { value: '1', label: '1:1' },
+    { value: '4/3', label: '4:3' },
+    { value: '3/2', label: '3:2' },
+    { value: '16/9', label: '16:9' },
+    { value: '4/5', label: '4:5' },
+    { value: '9/16', label: '9:16' },
+  ];
 
   // ---------- State ----------
 
@@ -184,6 +230,15 @@
   let marqKind = 'rect';
   let band = null;              // box being dragged with the Select tool
   let penDraft = null;          // pen path being drawn: { pts, cur }
+  let cropBox = null;           // crop box being set: { x, y, w, h }
+  let cropTarget = 'canvas';    // 'canvas' or 'layer'
+  let cropLayerId = null;
+  let cropRatio = 'free';
+  let warpMode = 'distort';     // 'skew', 'perspective' or 'distort'
+  let hoverPt = null;           // where the mouse is (for the brush circle)
+  let gradDraft = null;         // gradient line being dragged
+  let sampleCanvas = null;      // the finished artwork, for the eyedropper
+  const swatchInputs = { fg: null, bg: null };
 
   const undoStack = [];
   const redoStack = [];
@@ -204,6 +259,18 @@
     if (undoStack.length > HISTORY_LIMIT) undoStack.shift();
     redoStack.length = 0;
     updateHistoryButtons();
+    if (images.size > 24) gcImages();
+  }
+
+  // Painting makes a new picture for every stroke. Throw away the ones no undo step can reach.
+  function gcImages() {
+    const used = new Set();
+    const scan = (text) => { for (const m of text.matchAll(/"img":"(img-\d+)"/g)) used.add(m[1]); };
+    scan(snapshot());
+    undoStack.forEach(scan);
+    redoStack.forEach(scan);
+    if (pendingBefore) scan(pendingBefore);
+    for (const key of [...images.keys()]) if (!used.has(key)) images.delete(key);
   }
 
   // Run a change as one undo step, then redraw everything.
@@ -629,6 +696,29 @@
     });
   }
 
+  // Corner points (0 to 1 inside the box) for the straight-edged shapes.
+  const UNIT_POLYS = (() => {
+    const fit = (raw) => {
+      const xs = raw.map((q) => q[0]);
+      const ys = raw.map((q) => q[1]);
+      const minX = Math.min(...xs), maxX = Math.max(...xs);
+      const minY = Math.min(...ys), maxY = Math.max(...ys);
+      return raw.map((q) => [(q[0] - minX) / (maxX - minX), (q[1] - minY) / (maxY - minY)]);
+    };
+    const regular = (n) => fit(Array.from({ length: n }, (_, i) => {
+      const a = -Math.PI / 2 + (i * 2 * Math.PI) / n;
+      return [Math.cos(a), Math.sin(a)];
+    }));
+    return {
+      diamond: [[0.5, 0], [1, 0.5], [0.5, 1], [0, 0.5]],
+      pentagon: regular(5),
+      hexagon: fit(Array.from({ length: 6 }, (_, i) => [Math.cos((i * Math.PI) / 3), Math.sin((i * Math.PI) / 3)])),
+      arrow: [[0, 0.3], [0.6, 0.3], [0.6, 0], [1, 0.5], [0.6, 1], [0.6, 0.7], [0, 0.7]],
+      plus: [[0.35, 0], [0.65, 0], [0.65, 0.35], [1, 0.35], [1, 0.65], [0.65, 0.65], [0.65, 1],
+        [0.35, 1], [0.35, 0.65], [0, 0.65], [0, 0.35], [0.35, 0.35]],
+    };
+  })();
+
   // The outline of a shape layer, in document coordinates.
   function shapePath(l) {
     const p = new Path2D();
@@ -658,6 +748,36 @@
         else p.lineTo(px, py);
       });
       p.closePath();
+    } else if (UNIT_POLYS[l.shape]) {
+      UNIT_POLYS[l.shape].forEach((q, i) => {
+        if (i === 0) p.moveTo(x + q[0] * w, y + q[1] * h);
+        else p.lineTo(x + q[0] * w, y + q[1] * h);
+      });
+      p.closePath();
+    } else if (l.shape === 'heart') {
+      const P = (u, v) => [x + u * w, y + v * h];
+      p.moveTo(...P(0.5, 0.25));
+      p.bezierCurveTo(...P(0.5, 0.25), ...P(0.42, 0), ...P(0.2, 0));
+      p.bezierCurveTo(...P(0, 0), ...P(0, 0.25), ...P(0, 0.25));
+      p.bezierCurveTo(...P(0, 0.45), ...P(0.2, 0.65), ...P(0.5, 1));
+      p.bezierCurveTo(...P(0.8, 0.65), ...P(1, 0.45), ...P(1, 0.25));
+      p.bezierCurveTo(...P(1, 0.25), ...P(1, 0), ...P(0.8, 0));
+      p.bezierCurveTo(...P(0.58, 0), ...P(0.5, 0.25), ...P(0.5, 0.25));
+      p.closePath();
+    } else if (l.shape === 'bubble') {
+      const bh = h * 0.8;
+      const r = Math.min(w, bh) * 0.18;
+      if (p.roundRect) p.roundRect(x, y, w, bh, r);
+      else p.rect(x, y, w, bh);
+      const tail = new Path2D();
+      tail.moveTo(x + w * 0.18, y + bh - 1);
+      tail.lineTo(x + w * 0.12, y + h);
+      tail.lineTo(x + w * 0.42, y + bh - 1);
+      tail.closePath();
+      p.addPath(tail);
+    } else if (l.shape === 'line') {
+      p.moveTo(x, y);
+      p.lineTo(x + w, y + h);
     } else {
       const r = Math.min(l.radius || 0, w / 2, h / 2);
       if (r > 0 && p.roundRect) p.roundRect(x, y, w, h, r);
@@ -689,9 +809,50 @@
     return p;
   }
 
+  const withAlpha = (hex, a) => {
+    const [r, g, b] = hexToRgb(hex);
+    return 'rgba(' + r + ',' + g + ',' + b + ',' + a + ')';
+  };
+
+  function hexToRgb(hex) {
+    const m = /^#?([0-9a-f]{6})$/i.exec(hex || '');
+    const n = m ? parseInt(m[1], 16) : 0;
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+
+  // A gradient across the layer's box. Drawn with the Gradient tool it has its own
+  // start and end points; otherwise it runs along `gangle` (0 = left to right, 90 = top to bottom).
+  function makeGradient(g, l) {
+    const { x, y, width: w, height: h } = l;
+    const c2 = l.gfade ? withAlpha(l.gc1, 0) : l.gc2;
+    let grad;
+    if (l.gx1 != null) {
+      const x1 = x + l.gx1 * w, y1 = y + l.gy1 * h, x2 = x + l.gx2 * w, y2 = y + l.gy2 * h;
+      grad = l.gkind === 'radial'
+        ? g.createRadialGradient(x1, y1, 0, x1, y1, Math.max(1, Math.hypot(x2 - x1, y2 - y1)))
+        : g.createLinearGradient(x1, y1, x2, y2);
+    } else if (l.gkind === 'radial') {
+      grad = g.createRadialGradient(x + w / 2, y + h / 2, 0, x + w / 2, y + h / 2, Math.max(1, Math.hypot(w, h) / 2));
+    } else {
+      const a = ((l.gangle == null ? 90 : l.gangle) * Math.PI) / 180;
+      const dx = Math.cos(a), dy = Math.sin(a);
+      const half = (Math.abs(w * dx) + Math.abs(h * dy)) / 2;
+      const cx = x + w / 2, cy = y + h / 2;
+      grad = g.createLinearGradient(cx - dx * half, cy - dy * half, cx + dx * half, cy + dy * half);
+    }
+    grad.addColorStop(0, l.gc1 || '#000000');
+    grad.addColorStop(1, c2 || '#ffffff');
+    return grad;
+  }
+
+  const DASHES = { solid: [], dashed: [3, 2], dotted: [0.1, 2] };
+
   function paintVector(g, l) {
     const path = l.type === 'shape' ? shapePath(l) : pathPath(l);
-    if (l.fill) {
+    if (l.gkind && l.shape !== 'line') {
+      g.fillStyle = makeGradient(g, l);
+      g.fill(path);
+    } else if (l.fill && l.shape !== 'line') {
       g.fillStyle = l.fill;
       g.fill(path);
     }
@@ -699,8 +860,11 @@
       g.strokeStyle = l.stroke;
       g.lineWidth = l.strokeWidth;
       g.lineJoin = 'round';
-      g.lineCap = 'round';
+      g.lineCap = l.dash === 'dotted' ? 'round' : (l.shape === 'line' ? 'round' : 'butt');
+      const unit = (l.dash === 'dotted' ? 1 : 1) * l.strokeWidth;
+      g.setLineDash((DASHES[l.dash] || []).map((n) => Math.max(0.1, n * unit)));
       g.stroke(path);
+      g.setLineDash([]);
     }
   }
 
@@ -729,12 +893,10 @@
 
   // The box around a layer after it is turned.
   function layerBounds(l) {
-    const pts = [
-      fromLocal(l, { x: l.x, y: l.y }),
-      fromLocal(l, { x: l.x + l.width, y: l.y }),
-      fromLocal(l, { x: l.x, y: l.y + l.height }),
-      fromLocal(l, { x: l.x + l.width, y: l.y + l.height }),
-    ];
+    const pts = (l.warp ? quadCorners(l) : [
+      { x: l.x, y: l.y }, { x: l.x + l.width, y: l.y },
+      { x: l.x, y: l.y + l.height }, { x: l.x + l.width, y: l.y + l.height },
+    ]).map((q) => fromLocal(l, q));
     const xs = pts.map((q) => q.x);
     const ys = pts.map((q) => q.y);
     return { x: Math.min(...xs), y: Math.min(...ys), width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys) };
@@ -746,25 +908,126 @@
     return fromLocal(l, { x: l.x + l.width / 2, y: l.y - ROTATE_GAP / viewScale });
   }
 
-  function drawLayer(g, l, tier, ignoreOpacity) {
-    g.globalAlpha = ignoreOpacity ? 1 : l.opacity;
+  // ----- Skew / perspective / distort -----
+  // A bent layer remembers how far each corner moved: l.warp = [topLeft, topRight, bottomRight,
+  // bottomLeft], each [x, y] as a fraction of the layer's width and height. All zeros = not bent.
+
+  const NO_WARP = () => [[0, 0], [0, 0], [0, 0], [0, 0]];
+
+  // The four corners of the bent layer, in its own (not turned) frame.
+  function quadCorners(l) {
+    const w = l.warp || NO_WARP();
+    const X = l.x, Y = l.y, W = l.width, H = l.height;
+    return [
+      { x: X + w[0][0] * W, y: Y + w[0][1] * H },
+      { x: X + W + w[1][0] * W, y: Y + w[1][1] * H },
+      { x: X + W + w[2][0] * W, y: Y + H + w[2][1] * H },
+      { x: X + w[3][0] * W, y: Y + H + w[3][1] * H },
+    ];
+  }
+
+  // Maps a point in the unit square onto a four-corner shape (a "homography": it keeps
+  // straight lines straight, and gives true perspective).
+  function quadMap(q) {
+    const [p0, p1, p2, p3] = q;
+    const sx = p0.x - p1.x + p2.x - p3.x;
+    const sy = p0.y - p1.y + p2.y - p3.y;
+    let a, b, c, d, e, f, gg = 0, hh = 0;
+    if (Math.abs(sx) < 1e-9 && Math.abs(sy) < 1e-9) {
+      a = p1.x - p0.x; b = p3.x - p0.x; c = p0.x;
+      d = p1.y - p0.y; e = p3.y - p0.y; f = p0.y;
+    } else {
+      const dx1 = p1.x - p2.x, dx2 = p3.x - p2.x, dy1 = p1.y - p2.y, dy2 = p3.y - p2.y;
+      const den = dx1 * dy2 - dx2 * dy1 || 1e-9;
+      gg = (sx * dy2 - dx2 * sy) / den;
+      hh = (dx1 * sy - sx * dy1) / den;
+      a = p1.x - p0.x + gg * p1.x; b = p3.x - p0.x + hh * p3.x; c = p0.x;
+      d = p1.y - p0.y + gg * p1.y; e = p3.y - p0.y + hh * p3.y; f = p0.y;
+    }
+    return (u, v) => {
+      const k = gg * u + hh * v + 1;
+      return [(a * u + b * v + c) / k, (d * u + e * v + f) / k];
+    };
+  }
+
+  // Draws a picture triangle onto a triangle of the page (the browser can only stretch
+  // triangles, so we cut the bent picture into many small ones).
+  function drawTriangle(g, img, s0, s1, s2, d0, d1, d2) {
+    const [u0, v0] = s0, [u1, v1] = s1, [u2, v2] = s2;
+    const [x0, y0] = d0, [x1, y1] = d1, [x2, y2] = d2;
+    const delta = u0 * v1 + v0 * u2 + u1 * v2 - v1 * u2 - v0 * u1 - u0 * v2;
+    if (Math.abs(delta) < 1e-9) return;
+    // Pull the triangle out a little so neighbours overlap and no thin lines show between them.
+    const cx = (x0 + x1 + x2) / 3, cy = (y0 + y1 + y2) / 3;
+    const grow = (x, y) => {
+      const dx = x - cx, dy = y - cy, len = Math.hypot(dx, dy) || 1;
+      return [x + (dx / len) * 1.0, y + (dy / len) * 1.0];
+    };
+    g.save();
+    g.beginPath();
+    const a = grow(x0, y0), b = grow(x1, y1), c = grow(x2, y2);
+    g.moveTo(a[0], a[1]);
+    g.lineTo(b[0], b[1]);
+    g.lineTo(c[0], c[1]);
+    g.closePath();
+    g.clip();
+    g.transform(
+      (x0 * v1 + v0 * x2 + x1 * v2 - v1 * x2 - v0 * x1 - x0 * v2) / delta,
+      (y0 * v1 + v0 * y2 + y1 * v2 - v1 * y2 - v0 * y1 - y0 * v2) / delta,
+      (u0 * x1 + x0 * u2 + u1 * x2 - x1 * u2 - x0 * u1 - u0 * x2) / delta,
+      (u0 * y1 + y0 * u2 + u1 * y2 - y1 * u2 - y0 * u1 - u0 * y2) / delta,
+      (u0 * v1 * x2 + v0 * x1 * u2 + x0 * u1 * v2 - x0 * v1 * u2 - v0 * u1 * x2 - u0 * x1 * v2) / delta,
+      (u0 * v1 * y2 + v0 * y1 * u2 + y0 * u1 * v2 - y0 * v1 * u2 - v0 * u1 * y2 - u0 * y1 * v2) / delta
+    );
+    g.drawImage(img, 0, 0);
+    g.restore();
+  }
+
+  function drawWarped(g, source, l, tier) {
+    const map = quadMap(quadCorners(l));
+    const sw = srcW(source), sh = srcH(source);
+    const n = drag && drag.mode === 'warp' ? 8 : tier === 'export' ? 28 : 16;
+    const fx = !!l.flipX, fy = !!l.flipY;
+    const src = (u, v) => [(fx ? 1 - u : u) * sw, (fy ? 1 - v : v) * sh];
+    for (let j = 0; j < n; j++) {
+      for (let i = 0; i < n; i++) {
+        const u0 = i / n, u1 = (i + 1) / n, v0 = j / n, v1 = (j + 1) / n;
+        const A = map(u0, v0), B = map(u1, v0), C = map(u1, v1), D = map(u0, v1);
+        drawTriangle(g, source, src(u0, v0), src(u1, v0), src(u1, v1), A, B, C);
+        drawTriangle(g, source, src(u0, v0), src(u1, v1), src(u0, v1), A, C, D);
+      }
+    }
+  }
+
+  // `plain` draws the layer with no opacity and no blend mode (used when copying its pixels).
+  function drawLayer(g, l, tier, plain) {
+    g.globalAlpha = plain ? 1 : l.opacity;
+    g.globalCompositeOperation = !plain && l.blend && l.blend !== 'normal' ? l.blend : 'source-over';
     const rot = l.rotation || 0;
-    if (rot) {
+    const warped = l.type === 'image' && l.warp;
+    const flipped = (l.flipX || l.flipY) && !warped; // a bent picture mirrors its own pixels instead
+    const moved = rot || flipped;
+    if (moved) {
       g.save();
       g.translate(l.x + l.width / 2, l.y + l.height / 2);
-      g.rotate((rot * Math.PI) / 180);
+      if (rot) g.rotate((rot * Math.PI) / 180);
+      if (flipped) g.scale(l.flipX ? -1 : 1, l.flipY ? -1 : 1);
       g.translate(-(l.x + l.width / 2), -(l.y + l.height / 2));
     }
     if (l.type === 'image') {
       const source = getDrawable(l, tier);
-      if (source) g.drawImage(source, l.x, l.y, l.width, l.height);
+      if (source) {
+        if (warped) drawWarped(g, source, l, tier);
+        else g.drawImage(source, l.x, l.y, l.width, l.height);
+      }
     } else if (l.type === 'text') {
       drawText(g, l);
     } else {
       paintVector(g, l);
     }
-    if (rot) g.restore();
+    if (moved) g.restore();
     g.globalAlpha = 1;
+    g.globalCompositeOperation = 'source-over';
   }
 
   // Paints the document (no selection handles). Used for the screen and for export.
@@ -816,6 +1079,18 @@
       ctx.translate(l.x + l.width / 2, l.y + l.height / 2);
       ctx.rotate(radOf(l));
       ctx.strokeRect(-l.width / 2, -l.height / 2, l.width, l.height);
+      if (l.warp && l.type === 'image') {
+        ctx.save();
+        ctx.setLineDash([5 * s, 4 * s]);
+        ctx.beginPath();
+        quadCorners(l).forEach((c, i) => {
+          const px = c.x - (l.x + l.width / 2), py = c.y - (l.y + l.height / 2);
+          if (i) ctx.lineTo(px, py); else ctx.moveTo(px, py);
+        });
+        ctx.closePath();
+        ctx.stroke();
+        ctx.restore();
+      }
       if (layers.length === 1) {
         const size = HANDLE_PX * s;
         ctx.fillStyle = '#ffffff';
@@ -882,6 +1157,9 @@
     }
 
     if (penDraft) drawPenDraft();
+    if (tool === 'crop' && cropBox) drawCropOverlay();
+    if (tool === 'warp') drawWarpOverlay();
+    drawPaintOverlays();
   }
 
   function penPathOf(pts, cur) {
@@ -1197,6 +1475,8 @@
 
   function renderOpacity() {
     const ls = selectedLayers();
+    blendSelect.disabled = !ls.length;
+    blendSelect.value = ls.length ? (ls[0].blend || 'normal') : 'normal';
     opacity.disabled = !ls.length;
     paintRange(opacity, opacityOut, ls.length ? Math.round(ls[0].opacity * 100) : 100, 0, 100, 'var(--accent)');
   }
@@ -1291,6 +1571,10 @@
       for (const l of targets) {
         const oldName = kind === 'shape' ? typeLabel(l) : null;
         Object.assign(l, props);
+        if (kind === 'shape' && props.shape === 'line') {
+          if (!l.stroke) l.stroke = l.fill || '#111111';
+          if (!(l.strokeWidth >= 1)) l.strokeWidth = 4;
+        }
         if (kind === 'shape' && l.name === oldName) l.name = typeLabel(l);
         if (kind === 'text') fitText(l);
       }
@@ -1401,18 +1685,56 @@
       out.push(['Line height %', numberInput((cur.lineHeight || LINE_HEIGHT) * 100, 50, 300, (v) => setStyle('text', { lineHeight: v / 100 }, false, onLayers))]);
       out.push(['Color', colorInput('text', 'color', false, onLayers)]);
     } else if (kind === 'shape') {
-      out.push(['Shape', seg(SHAPES.map((s) => ({ value: s.value, label: s.label })), cur.shape,
-        (v) => setStyle('shape', { shape: v }, false, onLayers))]);
-      out.push(['Fill', colorInput('shape', 'fill', true, onLayers)]);
+      const pick = el('select');
+      for (const sh of SHAPES) {
+        const o = el('option', '', sh.label);
+        o.value = sh.value;
+        pick.append(o);
+      }
+      pick.value = cur.shape;
+      pick.addEventListener('change', () => setStyle('shape', { shape: pick.value }, false, onLayers));
+      out.push(['Shape', pick]);
+      if (cur.shape !== 'line') {
+        out.push(['Fill', colorInput('shape', 'fill', true, onLayers)]);
+        out.push(...gradientFields('shape', cur, onLayers));
+      }
       out.push(['Outline', colorInput('shape', 'stroke', true, onLayers)]);
       out.push(['Outline size', numberInput(cur.strokeWidth, 0, 200, (v) => setStyle('shape', { strokeWidth: v }, false, onLayers))]);
+      out.push(['Outline style', seg(DASH_ITEMS, cur.dash || 'solid', (v) => setStyle('shape', { dash: v }, false, onLayers))]);
       if (cur.shape === 'rect') {
         out.push(['Corners', numberInput(cur.radius || 0, 0, 2000, (v) => setStyle('shape', { radius: v }, false, onLayers))]);
       }
     } else {
       out.push(['Line', colorInput('path', 'stroke', true, onLayers)]);
       out.push(['Line size', numberInput(cur.strokeWidth, 0, 200, (v) => setStyle('path', { strokeWidth: v }, false, onLayers))]);
+      out.push(['Line style', seg(DASH_ITEMS, cur.dash || 'solid', (v) => setStyle('path', { dash: v }, false, onLayers))]);
       out.push(['Fill', colorInput('path', 'fill', true, onLayers)]);
+      out.push(...gradientFields('path', cur, onLayers));
+    }
+    return out;
+  }
+
+  const DASH_ITEMS = [
+    { value: 'solid', label: 'Solid' },
+    { value: 'dashed', label: 'Dashed' },
+    { value: 'dotted', label: 'Dotted' },
+  ];
+
+  // Gradient fill controls for shapes and paths.
+  function gradientFields(kind, cur, onLayers) {
+    const out = [];
+    out.push(['Gradient', seg([
+      { value: '', label: 'Off' }, { value: 'linear', label: 'Linear' }, { value: 'radial', label: 'Radial' },
+    ], cur.gkind || '', (v) => setStyle(kind, { gkind: v }, false, onLayers))]);
+    if (cur.gkind) {
+      out.push(['Color 1', colorInput(kind, 'gc1', false, onLayers)]);
+      out.push(['Color 2', colorInput(kind, 'gc2', false, onLayers)]);
+      out.push(['Fade out', seg([{ value: 'no', label: 'Off' }, { value: 'yes', label: 'On' }], cur.gfade ? 'yes' : 'no',
+        (v) => setStyle(kind, { gfade: v === 'yes' }, false, onLayers))]);
+      if (cur.gkind === 'linear') {
+        out.push(['Angle (°)', numberInput(cur.gangle == null ? 90 : cur.gangle, -360, 360,
+          (v) => setStyle(kind, { gangle: v, gx1: null, gy1: null, gx2: null, gy2: null }, false, onLayers))]);
+      }
     }
     return out;
   }
@@ -1565,6 +1887,9 @@
       } else {
         add(el('span', 'opt-label', sel.length > 1 ? 'Line up with each other' : 'Line up on the artwork'));
         add(seg(ALIGNS, null, alignSelected));
+        add(el('span', 'opt-sep'));
+        add(actionButton('Flip ↔', 'Flip left to right', false, () => flipSelected('x')));
+        add(actionButton('Flip ↕', 'Flip top to bottom', false, () => flipSelected('y')));
       }
     } else if (tool === 'marquee') {
       add(seg([{ value: 'rect', label: 'Rectangle' }, { value: 'ellipse', label: 'Ellipse' }], marqKind, (v) => {
@@ -1589,9 +1914,91 @@
     } else if (tool === 'pen') {
       for (const [label, control] of styleFields('path', false)) field(label, control);
       add(el('span', 'opt-hint', 'Click to add points. Drag to curve. Click the first point to close. Enter finishes.'));
+    } else if (tool === 'crop') {
+      const l = selected();
+      const photoOk = !!(l && l.type === 'image');
+      add(el('span', 'opt-label', 'Crop'));
+      add(seg([{ value: 'canvas', label: 'Canvas' }, ...(photoOk ? [{ value: 'layer', label: 'Selected photo' }] : [])],
+        cropTarget, (v) => { cropTarget = v; initCrop(true); renderToolOptions(); render(); }));
+      add(el('span', 'opt-sep'));
+      const ratio = el('select');
+      for (const r of CROP_RATIOS) {
+        const o = el('option', '', r.label);
+        o.value = r.value;
+        ratio.append(o);
+      }
+      ratio.value = cropRatio;
+      ratio.title = 'Shape of the crop';
+      ratio.addEventListener('change', () => {
+        cropRatio = ratio.value;
+        const r = cropRatioValue();
+        if (r && cropBox) fitCropRatio(cropBox, r, cropBounds());
+        render();
+      });
+      field('Shape', ratio);
+      add(actionButton('Apply crop', 'Crop now (Enter)', !cropBox, applyCrop));
+      add(actionButton('Reset', 'Start over (Esc)', !cropBox, () => { initCrop(true); render(); }));
+      add(el('span', 'opt-hint', 'Drag the handles. Enter applies.'));
+    } else if (tool === 'brush' || tool === 'eraser') {
+      const o = brushOpts[tool];
+      if (tool === 'brush') add(paintSwatches());
+      field('Size', numberInput(o.size, 1, 1000, (v) => { o.size = v; render(); }));
+      field('Hardness', numberInput(o.hardness, 0, 100, (v) => { o.hardness = v; }));
+      field('Opacity', numberInput(o.opacity, 1, 100, (v) => { o.opacity = v; }));
+      add(el('span', 'opt-hint', tool === 'brush' ? 'Paint on the selected photo, or on a new Paint layer.' : 'Rub out pixels on the selected layer.'));
+    } else if (tool === 'bucket') {
+      add(paintSwatches());
+      field('Match', numberInput(bucketOpts.tolerance, 0, 255, (v) => { bucketOpts.tolerance = v; }));
+      add(seg([{ value: 'yes', label: 'Touching only' }, { value: 'no', label: 'Whole layer' }], bucketOpts.contiguous ? 'yes' : 'no',
+        (v) => { bucketOpts.contiguous = v === 'yes'; renderToolOptions(); }));
+      field('Opacity', numberInput(bucketOpts.opacity, 1, 100, (v) => { bucketOpts.opacity = v; }));
+      add(el('span', 'opt-hint', 'Click to fill similar colors on the selected layer.'));
+    } else if (tool === 'gradient') {
+      add(paintSwatches());
+      add(seg([{ value: 'linear', label: 'Linear' }, { value: 'radial', label: 'Radial' }], gradientOpts.kind,
+        (v) => { gradientOpts.kind = v; renderToolOptions(); }));
+      add(seg([{ value: 'no', label: 'Two colors' }, { value: 'yes', label: 'Fade out' }], gradientOpts.fade ? 'yes' : 'no',
+        (v) => { gradientOpts.fade = v === 'yes'; renderToolOptions(); }));
+      add(el('span', 'opt-hint', 'Drag across the artwork. It becomes its own layer.'));
+    } else if (tool === 'eyedropper') {
+      add(paintSwatches());
+      add(el('span', 'opt-hint', 'Click to pick a color. Alt + click sets the second color.'));
+    } else if (tool === 'warp') {
+      add(seg([
+        { value: 'skew', label: 'Skew', title: 'Slide an edge sideways or up and down' },
+        { value: 'perspective', label: 'Perspective', title: 'Move a corner; the next corner moves the other way' },
+        { value: 'distort', label: 'Distort', title: 'Move each corner on its own' },
+      ], warpMode, (v) => { warpMode = v; renderToolOptions(); render(); }));
+      const bent = selectedLayers().some((l) => l.warp);
+      add(actionButton('Reset bend', 'Put the photo back to its normal shape', !bent, resetWarp));
+      add(el('span', 'opt-hint', selected() ? 'Drag the handles on the photo.' : 'Click a photo first.'));
     } else {
       add(el('span', 'opt-hint', 'Drag to move around the artwork.'));
     }
+  }
+
+  // The two painting colors (front and back), with a swap button.
+  function paintSwatches() {
+    const wrap = el('span', 'swatches');
+    for (const key of ['fg', 'bg']) {
+      const c = el('input');
+      c.type = 'color';
+      c.value = paint[key];
+      c.title = key === 'fg' ? 'Color to paint with' : 'Second color (gradient end)';
+      c.addEventListener('input', () => { paint[key] = c.value; });
+      swatchInputs[key] = c;
+      wrap.append(c);
+    }
+    const swap = el('button', 'btn btn-small', '⇄');
+    swap.type = 'button';
+    swap.title = 'Swap the two colors';
+    swap.addEventListener('click', () => {
+      [paint.fg, paint.bg] = [paint.bg, paint.fg];
+      swatchInputs.fg.value = paint.fg;
+      swatchInputs.bg.value = paint.bg;
+    });
+    wrap.append(swap);
+    return wrap;
   }
 
   // ---------- Design tab ----------
@@ -1631,6 +2038,15 @@
     }
 
     designBody.append(propRow('Rotate (°)', numberInput(l.rotation || 0, -180, 180, (v) => change(() => { l.rotation = v; }))));
+    const flips = el('div', 'seg');
+    for (const [label, axis, on] of [['Flip ↔', 'x', l.flipX], ['Flip ↕', 'y', l.flipY]]) {
+      const b = el('button', on ? 'on' : '', label);
+      b.type = 'button';
+      b.addEventListener('click', () => flipSelected(axis));
+      flips.append(b);
+    }
+    designBody.append(propRow('Flip', flips));
+    if (l.warp) designBody.append(propRow('Bend', actionButton('Reset bend', 'Put the photo back to its normal shape', false, resetWarp)));
 
     if (l.type === 'image') {
       designBody.append(el('p', 'tips', 'Open the Camera Raw tab to fix light and color on this photo.'));
@@ -1732,6 +2148,17 @@
       case 'down': moveLayer(id, -1); break;
       case 'delete': deleteLayers([id]); break;
     }
+  });
+
+  for (const b of BLENDS) {
+    const o = el('option', '', b.label);
+    o.value = b.value;
+    blendSelect.append(o);
+  }
+  blendSelect.addEventListener('change', () => {
+    const ls = selectedLayers();
+    if (!ls.length) return;
+    change(() => { for (const l of ls) l.blend = blendSelect.value; });
   });
 
   // Opacity (for every selected layer)
@@ -1869,12 +2296,23 @@
   const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
 
   function hitLayer(l, p0) {
-    const p = l.rotation ? toLocal(l, p0) : p0;
+    const p = l.rotation ? toLocal(l, p0) : { ...p0 };
+    if (l.warp && l.type === 'image') {
+      // inside the bent four-corner shape?
+      const q = quadCorners(l);
+      let inside = false;
+      for (let i = 0, j = 3; i < 4; j = i++) {
+        if ((q[i].y > p.y) !== (q[j].y > p.y) && p.x < ((q[j].x - q[i].x) * (p.y - q[i].y)) / (q[j].y - q[i].y) + q[i].x) inside = !inside;
+      }
+      return inside;
+    }
     if (l.type === 'shape' || l.type === 'path') {
+      if (l.flipX) p.x = 2 * l.x + l.width - p.x;
+      if (l.flipY) p.y = 2 * l.y + l.height - p.y;
       const path = l.type === 'shape' ? shapePath(l) : pathPath(l);
       ctx.save();
       ctx.lineWidth = Math.max(l.stroke ? l.strokeWidth : 0, 10 / viewScale);
-      const hit = (l.fill && ctx.isPointInPath(path, p.x, p.y)) || ctx.isPointInStroke(path, p.x, p.y);
+      const hit = ((l.fill || l.gkind) && ctx.isPointInPath(path, p.x, p.y)) || ctx.isPointInStroke(path, p.x, p.y);
       ctx.restore();
       return hit;
     }
@@ -2101,6 +2539,8 @@
       stroke: d.stroke,
       strokeWidth: d.strokeWidth,
       radius: d.radius,
+      dash: d.dash,
+      gkind: d.gkind, gc1: d.gc1, gc2: d.gc2, gangle: d.gangle, gfade: d.gfade,
       x: Math.round(p.x),
       y: Math.round(p.y),
       width: 1,
@@ -2108,6 +2548,11 @@
       opacity: 1,
       visible: true,
     };
+    if (l.shape === 'line') {
+      l.stroke = d.stroke || d.fill || '#111111';
+      l.strokeWidth = Math.max(2, d.strokeWidth);
+      l.fill = '';
+    }
     l.name = typeLabel(l);
     state.layers.push(l);
     sel = [l.id];
@@ -2129,6 +2574,10 @@
     l.y = Math.round(Math.min(s.y, s.y + h));
     l.width = Math.max(1, Math.round(Math.abs(w)));
     l.height = Math.max(1, Math.round(Math.abs(h)));
+    if (l.shape === 'line') {
+      l.flipX = w < 0; // a line remembers which way it was dragged
+      l.flipY = h < 0;
+    }
   }
 
   function downPen(e, p) {
@@ -2194,6 +2643,8 @@
       fill: dflt.fill,
       stroke: dflt.stroke,
       strokeWidth: dflt.strokeWidth,
+      dash: dflt.dash,
+      gkind: dflt.gkind, gc1: dflt.gc1, gc2: dflt.gc2, gangle: dflt.gangle, gfade: dflt.gfade,
     };
     change(() => {
       state.layers.push(layer);
@@ -2212,6 +2663,12 @@
     else if (tool === 'text') downText(e, p);
     else if (tool === 'shape') downShape(e, p);
     else if (tool === 'pen') downPen(e, p);
+    else if (tool === 'crop') downCrop(e, p);
+    else if (tool === 'brush' || tool === 'eraser') downPaint(e, p, tool);
+    else if (tool === 'bucket') downBucket(e, p);
+    else if (tool === 'gradient') downGradient(e, p);
+    else if (tool === 'eyedropper') downEyedropper(e, p);
+    else if (tool === 'warp') downWarp(e, p);
   });
 
   canvas.addEventListener('pointermove', (e) => {
@@ -2221,6 +2678,15 @@
       if (penDraft) {
         penDraft.cur = p;
         scheduleRender();
+      }
+      if (tool === 'brush' || tool === 'eraser') {
+        hoverPt = p;
+        scheduleRender();
+      } else if (tool === 'crop' && cropBox) {
+        cropCursor(p);
+      } else if (tool === 'warp') {
+        const l = selected();
+        canvas.style.cursor = l && l.type === 'image' && warpHandleAt(l, p) ? 'pointer' : 'crosshair';
       }
       return;
     }
@@ -2250,8 +2716,30 @@
         drag.pt.out = { x: p.x, y: p.y };
         drag.pt.in = { x: 2 * drag.pt.x - p.x, y: 2 * drag.pt.y - p.y };
       }
+    } else if (drag.mode === 'crop') {
+      updateCrop(p);
+    } else if (drag.mode === 'warp') {
+      const l = getLayer(drag.id);
+      if (l) updateWarp(l, p);
+    } else if (drag.mode === 'paint') {
+      const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
+      if (events.length > 1) for (const ev of events) paintTo(toDoc(ev));
+      else paintTo(p);
+      hoverPt = p;
+    } else if (drag.mode === 'gradient') {
+      gradDraft.x2 = p.x;
+      gradDraft.y2 = p.y;
+    } else if (drag.mode === 'eyedrop') {
+      sampleColor(p, drag.bg);
     }
     render();
+  });
+
+  canvas.addEventListener('pointerleave', () => {
+    if (hoverPt) {
+      hoverPt = null;
+      render();
+    }
   });
 
   function endDrag() {
@@ -2285,6 +2773,21 @@
       renderAll();
     } else if (d.mode === 'penhandle') {
       render();
+    } else if (d.mode === 'crop') {
+      renderToolOptions();
+      render();
+    } else if (d.mode === 'warp') {
+      const l = getLayer(d.id);
+      if (l && l.warp && l.warp.every((a) => Math.abs(a[0]) < 1e-4 && Math.abs(a[1]) < 1e-4)) l.warp = null;
+      commit(d.before);
+      renderAll();
+    } else if (d.mode === 'paint') {
+      commit(d.before);
+      renderAll();
+    } else if (d.mode === 'gradient') {
+      finishGradient();
+    } else if (d.mode === 'eyedrop') {
+      sampleCanvas = null;
     }
   }
 
@@ -2329,6 +2832,9 @@
     l.type = 'image';
     l.img = key;
     l.adjust = defaultAdjust();
+    l.flipX = false; // the flip and any bending are now part of the pixels
+    l.flipY = false;
+    l.warp = null;
   }
 
   function marqueeOp(kind) {
@@ -2340,6 +2846,10 @@
     }
     if (l.rotation) {
       toast('Set the rotation back to 0 first, then pick an area.');
+      return;
+    }
+    if (l.warp) {
+      toast('Reset the bend first, then pick an area.');
       return;
     }
     const raster = rasterize(l);
@@ -2394,6 +2904,666 @@
         sel = [id];
       }
     });
+  }
+
+  // ---------- Flip ----------
+
+  function flipSelected(axis) {
+    const ls = selectedLayers();
+    if (!ls.length) return;
+    change(() => {
+      for (const l of ls) {
+        if (axis === 'x') l.flipX = !l.flipX;
+        else l.flipY = !l.flipY;
+      }
+    });
+  }
+
+  // ---------- Crop ----------
+
+  function cropRatioValue() {
+    if (cropRatio === 'free') return null;
+    const [a, b] = cropRatio.split('/').map(Number);
+    return b ? a / b : a;
+  }
+
+  // The area the crop box must stay inside.
+  function cropBounds() {
+    if (cropTarget === 'layer') {
+      const l = getLayer(cropLayerId);
+      if (l) return { x: l.x, y: l.y, w: l.width, h: l.height };
+    }
+    return { x: 0, y: 0, w: state.doc.width, h: state.doc.height };
+  }
+
+  // Starts (or restarts) a crop box around the whole canvas, or around the selected photo.
+  function initCrop(keepTarget) {
+    const l = selected();
+    const photoOk = l && l.type === 'image' && l.visible;
+    if (!keepTarget) cropTarget = photoOk ? 'layer' : 'canvas';
+    if (cropTarget === 'layer' && !photoOk) cropTarget = 'canvas';
+    if (cropTarget === 'layer' && (l.rotation || l.warp)) {
+      toast('Set the rotation to 0 and reset any bend first. Cropping the canvas instead.');
+      cropTarget = 'canvas';
+    }
+    cropLayerId = cropTarget === 'layer' ? l.id : null;
+    const b = cropBounds();
+    cropBox = { x: b.x, y: b.y, w: b.w, h: b.h };
+    const r = cropRatioValue();
+    if (r) fitCropRatio(cropBox, r, b);
+  }
+
+  // Makes the box match the shape, as large as fits inside `b`, around its own middle.
+  function fitCropRatio(box, r, b) {
+    const cx = box.x + box.w / 2, cy = box.y + box.h / 2;
+    let w = box.w, h = box.w / r;
+    if (h > box.h) { h = box.h; w = h * r; }
+    box.x = clamp(cx - w / 2, b.x, b.x + b.w - w);
+    box.y = clamp(cy - h / 2, b.y, b.y + b.h - h);
+    box.w = w;
+    box.h = h;
+  }
+
+  const CROP_HANDLES = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
+
+  function cropHandlePos(b, name) {
+    const x = name.includes('w') ? b.x : name.includes('e') ? b.x + b.w : b.x + b.w / 2;
+    const y = name.includes('n') ? b.y : name.includes('s') ? b.y + b.h : b.y + b.h / 2;
+    return { x, y };
+  }
+
+  function cropHandleAt(p) {
+    if (!cropBox) return null;
+    const reach = (HANDLE_PX * 0.9) / viewScale;
+    for (const n of CROP_HANDLES) {
+      const h = cropHandlePos(cropBox, n);
+      if (Math.abs(p.x - h.x) <= reach && Math.abs(p.y - h.y) <= reach) return n;
+    }
+    if (p.x >= cropBox.x && p.x <= cropBox.x + cropBox.w && p.y >= cropBox.y && p.y <= cropBox.y + cropBox.h) return 'move';
+    return 'new';
+  }
+
+  function downCrop(e, p) {
+    if (!cropBox) initCrop(false);
+    const handle = cropHandleAt(p);
+    startDrag(e, { mode: 'crop', handle, start: p, orig: { ...cropBox } });
+  }
+
+  function updateCrop(p) {
+    const B = cropBounds();
+    const d = drag;
+    const o = d.orig;
+    const r = cropRatioValue();
+    const MIN = 8;
+    const cx = (v) => clamp(v, B.x, B.x + B.w);
+    const cy = (v) => clamp(v, B.y, B.y + B.h);
+    let x1 = o.x, y1 = o.y, x2 = o.x + o.w, y2 = o.y + o.h;
+
+    if (d.handle === 'move') {
+      const w = o.w, h = o.h;
+      x1 = clamp(o.x + (p.x - d.start.x), B.x, B.x + B.w - w);
+      y1 = clamp(o.y + (p.y - d.start.y), B.y, B.y + B.h - h);
+      cropBox = { x: x1, y: y1, w, h };
+      return;
+    }
+
+    if (d.handle === 'new') {
+      x1 = cx(d.start.x); y1 = cy(d.start.y);
+      x2 = cx(p.x); y2 = cy(p.y);
+      let w = Math.abs(x2 - x1), h = Math.abs(y2 - y1);
+      if (r) {
+        if (w / Math.max(h, 1e-6) > r) w = h * r; else h = w / r;
+      }
+      const sx = x2 >= x1 ? 1 : -1, sy = y2 >= y1 ? 1 : -1;
+      const ax = x1, ay = y1;
+      const nx = ax + sx * w, ny = ay + sy * h;
+      cropBox = { x: Math.min(ax, nx), y: Math.min(ay, ny), w: Math.max(w, 1), h: Math.max(h, 1) };
+      return;
+    }
+
+    const hd = d.handle;
+    if (hd.includes('w')) x1 = Math.min(cx(p.x), x2 - MIN);
+    if (hd.includes('e')) x2 = Math.max(cx(p.x), x1 + MIN);
+    if (hd.includes('n')) y1 = Math.min(cy(p.y), y2 - MIN);
+    if (hd.includes('s')) y2 = Math.max(cy(p.y), y1 + MIN);
+
+    if (r) {
+      let w = x2 - x1, h = y2 - y1;
+      if (hd.length === 2) {
+        if (w / h > r) w = h * r; else h = w / r;
+        if (hd.includes('w')) x1 = x2 - w; else x2 = x1 + w;
+        if (hd.includes('n')) y1 = y2 - h; else y2 = y1 + h;
+      } else if (hd === 'e' || hd === 'w') {
+        h = w / r;
+        const mid = o.y + o.h / 2;
+        if (h > B.h) { h = B.h; w = h * r; if (hd === 'w') x1 = x2 - w; else x2 = x1 + w; }
+        y1 = clamp(mid - h / 2, B.y, B.y + B.h - h);
+        y2 = y1 + h;
+      } else {
+        w = h * r;
+        const mid = o.x + o.w / 2;
+        if (w > B.w) { w = B.w; h = w / r; if (hd === 'n') y1 = y2 - h; else y2 = y1 + h; }
+        x1 = clamp(mid - w / 2, B.x, B.x + B.w - w);
+        x2 = x1 + w;
+      }
+    }
+    cropBox = { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
+  }
+
+  function cropCursor(p) {
+    const h = cropHandleAt(p);
+    const map = { nw: 'nwse-resize', se: 'nwse-resize', ne: 'nesw-resize', sw: 'nesw-resize', n: 'ns-resize', s: 'ns-resize', e: 'ew-resize', w: 'ew-resize', move: 'move', new: 'crosshair' };
+    canvas.style.cursor = map[h] || 'crosshair';
+  }
+
+  function drawCropOverlay() {
+    const b = cropBox;
+    const s = 1 / viewScale;
+    const d = state.doc;
+    ctx.save();
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+    ctx.beginPath();
+    ctx.rect(0, 0, d.width, d.height);
+    ctx.rect(b.x, b.y, b.w, b.h);
+    ctx.fill('evenodd');
+    ctx.lineWidth = 1.5 * s;
+    ctx.strokeStyle = '#ffffff';
+    ctx.strokeRect(b.x, b.y, b.w, b.h);
+    ctx.lineWidth = s;
+    ctx.strokeStyle = 'rgba(255,255,255,0.45)';
+    ctx.beginPath();
+    for (let k = 1; k <= 2; k++) {
+      ctx.moveTo(b.x + (b.w * k) / 3, b.y); ctx.lineTo(b.x + (b.w * k) / 3, b.y + b.h);
+      ctx.moveTo(b.x, b.y + (b.h * k) / 3); ctx.lineTo(b.x + b.w, b.y + (b.h * k) / 3);
+    }
+    ctx.stroke();
+    const size = HANDLE_PX * s;
+    ctx.fillStyle = '#ffffff';
+    ctx.strokeStyle = '#000000';
+    for (const n of CROP_HANDLES) {
+      const h = cropHandlePos(b, n);
+      ctx.fillRect(h.x - size / 2, h.y - size / 2, size, size);
+      ctx.strokeRect(h.x - size / 2, h.y - size / 2, size, size);
+    }
+    ctx.restore();
+  }
+
+  function applyCrop() {
+    if (!cropBox) return;
+    const b = { x: Math.round(cropBox.x), y: Math.round(cropBox.y), w: Math.round(cropBox.w), h: Math.round(cropBox.h) };
+    if (b.w < 2 || b.h < 2) return;
+
+    if (cropTarget === 'layer') {
+      const l = getLayer(cropLayerId);
+      if (!l || l.type !== 'image') return;
+      const img = images.get(l.img);
+      // Which part of the real picture is inside the box (the picture may be flipped).
+      let u1 = (cropBox.x - l.x) / l.width, u2 = (cropBox.x + cropBox.w - l.x) / l.width;
+      let v1 = (cropBox.y - l.y) / l.height, v2 = (cropBox.y + cropBox.h - l.y) / l.height;
+      if (l.flipX) [u1, u2] = [1 - u2, 1 - u1];
+      if (l.flipY) [v1, v2] = [1 - v2, 1 - v1];
+      const sx = Math.round(u1 * srcW(img)), sy = Math.round(v1 * srcH(img));
+      const sw = Math.max(1, Math.round((u2 - u1) * srcW(img))), sh = Math.max(1, Math.round((v2 - v1) * srcH(img)));
+      const out = document.createElement('canvas');
+      out.width = sw;
+      out.height = sh;
+      out.getContext('2d').drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
+      change(() => {
+        const key = 'img-' + nextImg++;
+        images.set(key, out);
+        l.img = key; // Camera Raw settings and flips stay as they were
+        l.x = b.x; l.y = b.y; l.width = b.w; l.height = b.h;
+      });
+    } else {
+      change(() => {
+        const d = state.doc;
+        d.width = clamp(b.w, 1, MAX_DOC);
+        d.height = clamp(b.h, 1, MAX_DOC);
+        d.autoSize = false;
+        for (const l of state.layers) { l.x -= b.x; l.y -= b.y; }
+      });
+    }
+    cropBox = null;
+    setTool('select');
+  }
+
+  // ---------- Skew, perspective, distort ----------
+
+  // Photos can be bent. Anything else is first turned into a picture.
+  function prepareWarp() {
+    const l = selected();
+    if (!l || l.type === 'image') return;
+    if (l.rotation) { toast('Set the rotation to 0 first (Design tab), then bend it.'); return; }
+    change(() => {
+      const r = rasterize(l);
+      putPixels(l, r.canvas);
+    });
+    toast('Turned into a picture so it can be bent.');
+  }
+
+  function warpHandles(l) {
+    const q = quadCorners(l);
+    const mid = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+    const list = warpMode === 'skew'
+      ? [['n', mid(q[0], q[1])], ['e', mid(q[1], q[2])], ['s', mid(q[2], q[3])], ['w', mid(q[3], q[0])]]
+      : q.map((c, i) => ['c' + i, c]);
+    return list.map(([name, pt]) => ({ name, ...fromLocal(l, pt) }));
+  }
+
+  function warpHandleAt(l, p) {
+    const reach = (HANDLE_PX * 1.0) / viewScale;
+    for (const h of warpHandles(l)) {
+      if (Math.abs(p.x - h.x) <= reach && Math.abs(p.y - h.y) <= reach) return h.name;
+    }
+    return null;
+  }
+
+  function downWarp(e, p) {
+    let l = selected();
+    if (l && l.type === 'image' && l.visible) {
+      const handle = warpHandleAt(l, p);
+      if (handle) {
+        const before = snapshot();
+        if (!l.warp) l.warp = NO_WARP();
+        startDrag(e, {
+          mode: 'warp', id: l.id, handle, before,
+          start: l.rotation ? toLocal(l, p) : p,
+          orig: l.warp.map((a) => a.slice()),
+        });
+        return;
+      }
+    }
+    const hit = hitTest(p);
+    if (hit) {
+      sel = [hit.id];
+      prepareWarp();
+      renderSidePanels();
+      render();
+    }
+  }
+
+  function updateWarp(l, p) {
+    const d = drag;
+    const q = l.rotation ? toLocal(l, p) : p;
+    const dx = (q.x - d.start.x) / l.width;
+    const dy = (q.y - d.start.y) / l.height;
+    const w = d.orig.map((a) => a.slice());
+    const hd = d.handle;
+    const LIM = 3;
+    if (hd[0] === 'c') {
+      const i = Number(hd[1]);
+      w[i][0] += dx;
+      w[i][1] += dy;
+      if (warpMode === 'perspective') {
+        w[[1, 0, 3, 2][i]][0] -= dx; // the corner next to it, along the same top or bottom edge
+        w[[3, 2, 1, 0][i]][1] -= dy; // the corner next to it, along the same left or right edge
+      }
+    } else if (hd === 'n') { w[0][0] += dx; w[1][0] += dx; }
+    else if (hd === 's') { w[2][0] += dx; w[3][0] += dx; }
+    else if (hd === 'w') { w[0][1] += dy; w[3][1] += dy; }
+    else if (hd === 'e') { w[1][1] += dy; w[2][1] += dy; }
+    l.warp = w.map((a) => [clamp(a[0], -LIM, LIM), clamp(a[1], -LIM, LIM)]);
+  }
+
+  function drawWarpOverlay() {
+    const l = selected();
+    if (!l || l.type !== 'image' || !l.visible) return;
+    const s = 1 / viewScale;
+    const q = quadCorners(l);
+    ctx.save();
+    ctx.translate(l.x + l.width / 2, l.y + l.height / 2);
+    ctx.rotate(radOf(l));
+    ctx.translate(-(l.x + l.width / 2), -(l.y + l.height / 2));
+    ctx.lineWidth = 1.5 * s;
+    ctx.strokeStyle = colors.accent;
+    ctx.beginPath();
+    q.forEach((c, i) => (i ? ctx.lineTo(c.x, c.y) : ctx.moveTo(c.x, c.y)));
+    ctx.closePath();
+    ctx.stroke();
+    ctx.restore();
+    const size = HANDLE_PX * s;
+    ctx.save();
+    ctx.fillStyle = '#ffffff';
+    ctx.strokeStyle = colors.accent;
+    ctx.lineWidth = 2 * s;
+    for (const h of warpHandles(l)) {
+      ctx.beginPath();
+      if (warpMode === 'skew') ctx.rect(h.x - size / 2, h.y - size / 2, size, size);
+      else ctx.arc(h.x, h.y, size * 0.6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function resetWarp() {
+    const ls = selectedLayers().filter((l) => l.warp);
+    if (!ls.length) return;
+    change(() => { for (const l of ls) l.warp = null; });
+  }
+
+  // ---------- Painting: brush, eraser, paint bucket, gradient, eyedropper ----------
+
+  function newPaintLayer() {
+    const c = document.createElement('canvas');
+    c.width = state.doc.width;
+    c.height = state.doc.height;
+    const key = 'img-' + nextImg++;
+    images.set(key, c);
+    const l = {
+      id: 'layer-' + nextId++, type: 'image', img: key, name: 'Paint',
+      x: 0, y: 0, width: c.width, height: c.height, opacity: 1, visible: true, adjust: defaultAdjust(),
+    };
+    const at = selected() ? state.layers.indexOf(selected()) + 1 : state.layers.length;
+    state.layers.splice(at, 0, l);
+    sel = [l.id];
+    return l;
+  }
+
+  // Finds the layer a painting tool should work on, and makes one when it has to.
+  // Call it before the undo snapshot is saved, so one Undo puts everything back.
+  function paintTarget(mode) {
+    const l = selected();
+    const clean = l && l.visible && l.type === 'image' && isDefaultAdjust(l.adjust) && !l.rotation && !l.warp;
+    if (mode === 'brush') {
+      const img = clean ? images.get(l.img) : null;
+      const huge = img && srcW(img) * srcH(img) > 12e6; // keep strokes quick on very big photos
+      if (clean && !huge) return l;
+      return newPaintLayer();
+    }
+    if (!l || !l.visible) {
+      toast('Click a layer first.');
+      return null;
+    }
+    if (l.rotation) {
+      toast('Set the rotation back to 0 first (Design tab).');
+      return null;
+    }
+    if (l.warp) {
+      toast('Reset the bend first (Design tab).');
+      return null;
+    }
+    if (!clean) {
+      const r = rasterize(l); // text, shapes and Camera Raw edits become plain pixels
+      putPixels(l, r.canvas);
+      toast('This layer was turned into plain pixels so it can be painted on.');
+    }
+    return l;
+  }
+
+  function makeDab(diameter, hardness, color) {
+    const D = Math.max(2, Math.ceil(diameter) + 2);
+    const c = document.createElement('canvas');
+    c.width = D;
+    c.height = D;
+    const g = c.getContext('2d');
+    const r = diameter / 2;
+    const m = D / 2;
+    if (hardness >= 99) {
+      g.fillStyle = color;
+      g.beginPath();
+      g.arc(m, m, Math.max(r, 0.5), 0, Math.PI * 2);
+      g.fill();
+    } else {
+      const grad = g.createRadialGradient(m, m, 0, m, m, Math.max(r, 0.5));
+      grad.addColorStop(0, withAlpha(color, 1));
+      grad.addColorStop(Math.max(0, hardness / 100), withAlpha(color, 1));
+      grad.addColorStop(1, withAlpha(color, 0));
+      g.fillStyle = grad;
+      g.fillRect(0, 0, D, D);
+    }
+    return c;
+  }
+
+  function downPaint(e, p, mode) {
+    const before = snapshot();
+    const l = paintTarget(mode === 'eraser' ? 'edit' : 'brush');
+    if (!l) return;
+    const r = rasterize(l); // a fresh copy, so Undo can go back to the old pixels
+    putPixels(l, r.canvas);
+    const o = brushOpts[mode];
+    const base = document.createElement('canvas');
+    base.width = r.canvas.width;
+    base.height = r.canvas.height;
+    base.getContext('2d').drawImage(r.canvas, 0, 0);
+    const stroke = document.createElement('canvas');
+    stroke.width = r.canvas.width;
+    stroke.height = r.canvas.height;
+    const diameter = Math.max(1, o.size * r.sx);
+    startDrag(e, {
+      mode: 'paint', erase: mode === 'eraser', id: l.id, canvas: r.canvas, base, stroke,
+      sprite: makeDab(diameter, o.hardness, mode === 'eraser' ? '#000000' : paint.fg),
+      sx: r.sx, sy: r.sy, opacity: o.opacity / 100, spacing: Math.max(0.5, diameter * 0.12),
+      last: null, carry: 0, before,
+    });
+    sel = [l.id];
+    renderPanel();
+    renderOpacity();
+    paintTo(p);
+  }
+
+  function paintTo(p) {
+    const d = drag;
+    const l = getLayer(d.id);
+    if (!l) return;
+    const x = (p.x - l.x) * d.sx;
+    const y = (p.y - l.y) * d.sy;
+    const g = d.stroke.getContext('2d');
+    const r = d.sprite.width / 2;
+    let x1 = x - r, y1 = y - r, x2 = x + r, y2 = y + r;
+    if (!d.last) {
+      g.drawImage(d.sprite, x - r, y - r);
+    } else {
+      const dx = x - d.last.x, dy = y - d.last.y;
+      const len = Math.hypot(dx, dy);
+      let t = d.spacing - d.carry;
+      let n = 0;
+      while (t <= len) {
+        const px = d.last.x + (dx * t) / len, py = d.last.y + (dy * t) / len;
+        g.drawImage(d.sprite, px - r, py - r);
+        x1 = Math.min(x1, px - r); y1 = Math.min(y1, py - r);
+        x2 = Math.max(x2, px + r); y2 = Math.max(y2, py + r);
+        t += d.spacing;
+        n++;
+      }
+      d.carry = d.carry + len - n * d.spacing;
+      x1 = Math.min(x1, d.last.x - r); y1 = Math.min(y1, d.last.y - r);
+      x2 = Math.max(x2, d.last.x + r); y2 = Math.max(y2, d.last.y + r);
+    }
+    d.last = { x, y };
+
+    // Redraw only the part that changed: the old pixels, then the stroke on top.
+    const W = d.canvas.width, H = d.canvas.height;
+    const rx = clamp(Math.floor(x1) - 1, 0, W), ry = clamp(Math.floor(y1) - 1, 0, H);
+    const rw = clamp(Math.ceil(x2) + 1, 0, W) - rx, rh = clamp(Math.ceil(y2) + 1, 0, H) - ry;
+    if (rw <= 0 || rh <= 0) return;
+    const c = d.canvas.getContext('2d');
+    c.save();
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    c.globalCompositeOperation = 'source-over';
+    c.globalAlpha = 1;
+    c.clearRect(rx, ry, rw, rh);
+    c.drawImage(d.base, rx, ry, rw, rh, rx, ry, rw, rh);
+    c.globalCompositeOperation = d.erase ? 'destination-out' : 'source-over';
+    c.globalAlpha = d.opacity;
+    c.drawImage(d.stroke, rx, ry, rw, rh, rx, ry, rw, rh);
+    c.restore();
+  }
+
+  // Colors: pick one pixel from the finished artwork.
+  function sampleColor(p, toBackground) {
+    const d = state.doc;
+    if (!sampleCanvas) {
+      sampleCanvas = document.createElement('canvas');
+      sampleCanvas.width = d.width;
+      sampleCanvas.height = d.height;
+      paintDocument(sampleCanvas.getContext('2d', { willReadFrequently: true }), true, 'preview');
+    }
+    const x = clamp(Math.floor(p.x), 0, d.width - 1);
+    const y = clamp(Math.floor(p.y), 0, d.height - 1);
+    const px = sampleCanvas.getContext('2d').getImageData(x, y, 1, 1).data;
+    const hex = '#' + [px[0], px[1], px[2]].map((v) => v.toString(16).padStart(2, '0')).join('');
+    if (toBackground) paint.bg = hex;
+    else paint.fg = hex;
+    if (swatchInputs.fg) swatchInputs.fg.value = paint.fg;
+    if (swatchInputs.bg) swatchInputs.bg.value = paint.bg;
+  }
+
+  function downEyedropper(e, p) {
+    sampleCanvas = null;
+    sampleColor(p, e.altKey);
+    startDrag(e, { mode: 'eyedrop', bg: e.altKey });
+  }
+
+  // Paint bucket: fill the area of similar color that was clicked.
+  function floodMask(img, x0, y0, tol, contiguous) {
+    const { data, width: w, height: h } = img;
+    const i0 = (y0 * w + x0) * 4;
+    const r0 = data[i0], g0 = data[i0 + 1], b0 = data[i0 + 2], a0 = data[i0 + 3];
+    const match = (i) => {
+      const a = data[i + 3];
+      if (a0 === 0 && a === 0) return true;
+      return Math.max(Math.abs(data[i] - r0), Math.abs(data[i + 1] - g0), Math.abs(data[i + 2] - b0), Math.abs(a - a0)) <= tol;
+    };
+    const mask = new Uint8Array(w * h);
+    if (!contiguous) {
+      for (let p = 0; p < w * h; p++) if (match(p * 4)) mask[p] = 1;
+      return mask;
+    }
+    const stack = [x0, y0];
+    while (stack.length) {
+      const y = stack.pop();
+      let x = stack.pop();
+      while (x >= 0 && !mask[y * w + x] && match((y * w + x) * 4)) x--;
+      x++;
+      let up = false, down = false;
+      while (x < w && !mask[y * w + x] && match((y * w + x) * 4)) {
+        mask[y * w + x] = 1;
+        if (y > 0) {
+          const m = !mask[(y - 1) * w + x] && match(((y - 1) * w + x) * 4);
+          if (m && !up) stack.push(x, y - 1);
+          up = m;
+        }
+        if (y < h - 1) {
+          const m = !mask[(y + 1) * w + x] && match(((y + 1) * w + x) * 4);
+          if (m && !down) stack.push(x, y + 1);
+          down = m;
+        }
+        x++;
+      }
+    }
+    return mask;
+  }
+
+  function downBucket(e, p) {
+    change(() => {
+      const l = paintTarget('edit');
+      if (!l) return;
+      const r = rasterize(l);
+      const g = r.canvas.getContext('2d', { willReadFrequently: true });
+      const x = Math.floor((p.x - l.x) * r.sx);
+      const y = Math.floor((p.y - l.y) * r.sy);
+      const W = r.canvas.width, H = r.canvas.height;
+      if (x < 0 || y < 0 || x >= W || y >= H) {
+        toast('Click on the selected layer to fill it.');
+        return;
+      }
+      const img = g.getImageData(0, 0, W, H);
+      const mask = floodMask(img, x, y, bucketOpts.tolerance, bucketOpts.contiguous);
+      // Grow the area by one pixel so soft edges are covered too.
+      const grown = new Uint8Array(mask);
+      for (let yy = 0; yy < H; yy++) {
+        for (let xx = 0; xx < W; xx++) {
+          const i = yy * W + xx;
+          if (mask[i]) continue;
+          if ((xx > 0 && mask[i - 1]) || (xx < W - 1 && mask[i + 1]) || (yy > 0 && mask[i - W]) || (yy < H - 1 && mask[i + W])) grown[i] = 1;
+        }
+      }
+      const [fr, fg, fb] = hexToRgb(paint.fg);
+      const a = bucketOpts.opacity / 100;
+      const d = img.data;
+      for (let i = 0; i < grown.length; i++) {
+        if (!grown[i]) continue;
+        const k = i * 4;
+        const sa = d[k + 3] / 255;
+        const oa = a + sa * (1 - a);
+        d[k] = (fr * a + d[k] * sa * (1 - a)) / oa;
+        d[k + 1] = (fg * a + d[k + 1] * sa * (1 - a)) / oa;
+        d[k + 2] = (fb * a + d[k + 2] * sa * (1 - a)) / oa;
+        d[k + 3] = oa * 255;
+      }
+      g.putImageData(img, 0, 0);
+      putPixels(l, r.canvas);
+    });
+  }
+
+  // Gradient: drag across the artwork. It becomes its own layer, so it can be changed later.
+  function downGradient(e, p) {
+    gradDraft = { x1: p.x, y1: p.y, x2: p.x, y2: p.y };
+    startDrag(e, { mode: 'gradient' });
+  }
+
+  function finishGradient() {
+    const g = gradDraft;
+    gradDraft = null;
+    if (!g || Math.hypot(g.x2 - g.x1, g.y2 - g.y1) < 3) {
+      render();
+      return;
+    }
+    const d = state.doc;
+    change(() => {
+      const l = {
+        id: 'layer-' + nextId++, type: 'shape', name: 'Gradient', shape: 'rect',
+        fill: '', stroke: '', strokeWidth: 0, radius: 0, dash: 'solid',
+        gkind: gradientOpts.kind, gc1: paint.fg, gc2: paint.bg, gfade: gradientOpts.fade, gangle: 90,
+        gx1: g.x1 / d.width, gy1: g.y1 / d.height, gx2: g.x2 / d.width, gy2: g.y2 / d.height,
+        x: 0, y: 0, width: d.width, height: d.height, opacity: 1, visible: true,
+      };
+      const at = selected() ? state.layers.indexOf(selected()) + 1 : state.layers.length;
+      state.layers.splice(at, 0, l);
+      sel = [l.id];
+    });
+  }
+
+  function drawPaintOverlays() {
+    const s = 1 / viewScale;
+    if (hoverPt && (tool === 'brush' || tool === 'eraser') && !drag) {
+      const r = brushOpts[tool].size / 2;
+      ctx.save();
+      ctx.lineWidth = s;
+      ctx.beginPath();
+      ctx.arc(hoverPt.x, hoverPt.y, Math.max(r, s), 0, Math.PI * 2);
+      ctx.strokeStyle = '#000000';
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(hoverPt.x, hoverPt.y, Math.max(r, s) + s, 0, Math.PI * 2);
+      ctx.strokeStyle = '#ffffff';
+      ctx.stroke();
+      ctx.restore();
+    }
+    if (gradDraft) {
+      ctx.save();
+      ctx.lineWidth = 2 * s;
+      ctx.strokeStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.moveTo(gradDraft.x1, gradDraft.y1);
+      ctx.lineTo(gradDraft.x2, gradDraft.y2);
+      ctx.stroke();
+      ctx.lineWidth = s;
+      ctx.strokeStyle = '#000000';
+      ctx.stroke();
+      ctx.fillStyle = paint.fg;
+      ctx.beginPath();
+      ctx.arc(gradDraft.x1, gradDraft.y1, 5 * s, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = paint.bg;
+      ctx.beginPath();
+      ctx.arc(gradDraft.x2, gradDraft.y2, 5 * s, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    }
   }
 
   // ---------- Opening images ----------
@@ -2640,8 +3810,13 @@
       finishTextEdit();
       if (penDraft) finishPen(false, false);
       if (name !== 'marquee') marq = null;
+      cropBox = null;
+      hoverPt = null;
+      gradDraft = null;
     }
     tool = name;
+    if (name === 'crop' && !cropBox) initCrop(false);
+    if (name === 'warp') prepareWarp();
     workspace.dataset.tool = name;
     canvas.style.cursor = '';
     document.querySelectorAll('.rail-btn[data-tool]').forEach((b) => {
@@ -2702,7 +3877,7 @@
 
   // ---------- Keyboard ----------
 
-  const TOOL_KEYS = { v: 'select', m: 'marquee', t: 'text', u: 'shape', p: 'pen', h: 'hand' };
+  const TOOL_KEYS = { v: 'select', m: 'marquee', c: 'crop', t: 'text', u: 'shape', p: 'pen', b: 'brush', e: 'eraser', k: 'bucket', g: 'gradient', i: 'eyedropper', d: 'warp', h: 'hand' };
 
   document.addEventListener('keydown', (e) => {
     if (newDialog.open || fontsDialog.open) return;
@@ -2732,6 +3907,12 @@
       redo();
     } else if (mod) {
       return;
+    } else if (tool === 'crop' && cropBox && e.key === 'Enter') {
+      applyCrop();
+    } else if (tool === 'crop' && e.key === 'Escape') {
+      initCrop(true);
+      renderToolOptions();
+      render();
     } else if (penDraft && e.key === 'Enter') {
       finishPen(false, true);
     } else if (penDraft && e.key === 'Escape') {
