@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MagicShop</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Anton&family=Bebas+Neue&family=Dancing+Script:wght@400;700&family=Inter:ital,wght@0,400;0,700;1,400;1,700&family=Lobster&family=Montserrat:ital,wght@0,400;0,700;1,400;1,700&family=Oswald:wght@400;700&family=Pacifico&family=Playfair+Display:ital,wght@0,400;0,700;1,400;1,700&family=Poppins:ital,wght@0,400;0,700;1,400;1,700&family=Raleway:ital,wght@0,400;0,700;1,400;1,700&family=Roboto+Mono:ital,wght@0,400;0,700;1,400;1,700&display=swap">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app">
+
+    <!-- ===== Top bar ===== -->
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 4V2m0 14v-2M8 9h2m10 0h2M17.8 11.8L19 13M17.8 6.2L19 5M3 21l9-9M12.2 6.2L11 5"/></svg>
+        </span>
+        <span class="brand-name">MagicShop</span>
+      </div>
+
+      <div class="group">
+        <button id="btn-new" type="button" class="btn">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Create artwork
+        </button>
+        <button id="btn-open" type="button" class="btn">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+          Open image
+        </button>
+        <input id="file-input" type="file" accept="image/*" multiple hidden>
+      </div>
+
+      <div class="group">
+        <span class="dim-label">Dimensions</span>
+        <span id="doc-size" class="chip">1200 × 800</span>
+      </div>
+
+      <div class="spacer"></div>
+      <div class="doc-title" title="Artwork name"><span id="doc-name">Untitled artwork</span></div>
+      <div class="spacer"></div>
+
+      <div class="group">
+        <button id="btn-undo" type="button" class="btn btn-icon" disabled title="Undo (Ctrl+Z)" aria-label="Undo">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+        </button>
+        <button id="btn-redo" type="button" class="btn btn-icon" disabled title="Redo (Ctrl+Shift+Z)" aria-label="Redo">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.13-9.36L23 10"/></svg>
+        </button>
+      </div>
+
+      <div class="group">
+        <select id="export-format" aria-label="Export format">
+          <option value="png">PNG</option>
+          <option value="jpeg">JPG</option>
+        </select>
+        <button id="btn-export" type="button" class="btn btn-download">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Download
+        </button>
+      </div>
+    </header>
+
+    <!-- ===== Tool rail ===== -->
+    <nav class="rail" aria-label="Tools">
+      <button type="button" class="rail-btn tool-active" data-tool="select" title="Select (V)" aria-label="Select tool">
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z"/><path d="M13 13l6 6"/></svg>
+      </button>
+      <button type="button" class="rail-btn" data-tool="marquee" title="Area selection (M)" aria-label="Area selection tool">
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="1" stroke-dasharray="3 3"/></svg>
+      </button>
+      <button type="button" class="rail-btn" data-tool="text" title="Text (T)" aria-label="Text tool">
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 7 4 4 20 4 20 7"/><line x1="9" y1="20" x2="15" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/></svg>
+      </button>
+      <button type="button" class="rail-btn" data-tool="shape" title="Shapes (U)" aria-label="Shapes tool">
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="10" height="10" rx="1"/><circle cx="16" cy="16" r="5"/></svg>
+      </button>
+      <button type="button" class="rail-btn" data-tool="pen" title="Pen (P)" aria-label="Pen tool">
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/><path d="M2 2l7.586 7.586"/><circle cx="11" cy="11" r="2"/></svg>
+      </button>
+      <button type="button" class="rail-btn" data-tool="hand" title="Pan (H, or hold Space)" aria-label="Pan tool">
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="5 9 2 12 5 15"/><polyline points="9 5 12 2 15 5"/><polyline points="15 19 12 22 9 19"/><polyline points="19 9 22 12 19 15"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="12" y1="2" x2="12" y2="22"/></svg>
+      </button>
+
+      <div class="rail-divider"></div>
+
+      <button type="button" class="rail-btn" data-tab="layers" title="Layers" aria-label="Layers">
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+      </button>
+      <button type="button" class="rail-btn" data-tab="design" title="Design" aria-label="Design">
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="13.5" cy="6.5" r=".5"/><circle cx="17.5" cy="10.5" r=".5"/><circle cx="8.5" cy="7.5" r=".5"/><circle cx="6.5" cy="12.5" r=".5"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/></svg>
+      </button>
+      <button type="button" class="rail-btn" data-tab="raw" title="Camera Raw" aria-label="Camera Raw">
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
+      </button>
+      <button type="button" class="rail-btn" id="rail-open" title="Open image" aria-label="Open image">
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+      </button>
+
+      <div class="rail-spacer"></div>
+      <div class="version">Version 0.4</div>
+    </nav>
+
+    <!-- ===== Canvas area (rulers + workspace) ===== -->
+    <section class="canvas-area">
+      <div class="ruler-corner"></div>
+      <canvas id="ruler-x" class="ruler ruler-x"></canvas>
+      <canvas id="ruler-y" class="ruler ruler-y"></canvas>
+
+      <div class="workspace-wrap">
+        <div id="workspace" class="workspace" data-tool="select">
+          <div class="stage">
+            <div id="canvas-holder" class="canvas-holder">
+              <canvas id="canvas" width="1200" height="800"></canvas>
+              <textarea id="text-editor" class="text-editor" wrap="off" spellcheck="false" hidden aria-label="Edit text"></textarea>
+            </div>
+          </div>
+        </div>
+
+        <div id="tool-options" class="tool-options"></div>
+
+        <div id="hint" class="hint">Drop an image here, or press “Open image”</div>
+
+        <div class="zoom-pill">
+          <button id="btn-zoom-out" type="button" class="icon-btn" title="Zoom out ( [ )" aria-label="Zoom out">
+            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          </button>
+          <input id="zoom-slider" class="slider" type="range" min="0" max="1000" value="500" aria-label="Zoom">
+          <button id="btn-zoom-in" type="button" class="icon-btn" title="Zoom in ( ] )" aria-label="Zoom in">
+            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          </button>
+          <span id="zoom-label" class="chip">100%</span>
+          <button id="btn-fit" type="button" class="btn btn-small" title="Fit to screen (0)">Fit</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== Right panel ===== -->
+    <aside class="panel">
+      <div class="tabs" role="tablist">
+        <button type="button" class="tab" role="tab" data-tab="layers">Layers</button>
+        <button type="button" class="tab" role="tab" data-tab="design">Design</button>
+        <button type="button" class="tab" role="tab" data-tab="raw">Camera Raw</button>
+      </div>
+
+      <!-- Layers tab -->
+      <section id="tab-layers" class="tab-body">
+        <div class="opacity-row">
+          <label for="opacity">Opacity</label>
+          <output id="opacity-out" for="opacity" class="chip chip-small">100</output>
+          <input id="opacity" class="slider" type="range" min="0" max="100" value="100" disabled>
+        </div>
+
+        <ul id="layer-list" class="layer-list"></ul>
+
+        <p class="tips">
+          Drag to move a layer. Drag a corner to resize it (Shift switches between free and locked shape).
+          Scroll to move up and down. Hold Ctrl and scroll to zoom, or press ] and [.
+          Hold Space and drag to move around.
+        </p>
+      </section>
+
+      <!-- Design tab -->
+      <section id="tab-design" class="tab-body" hidden>
+        <div id="design-empty" class="raw-empty"></div>
+        <div id="design-body" class="raw-body" hidden></div>
+      </section>
+
+      <!-- Camera Raw tab -->
+      <section id="tab-raw" class="tab-body" hidden>
+        <div class="raw-head">
+          <div class="crumb">
+            <span class="crumb-muted">Camera Raw /</span>
+            <strong id="raw-layer-name" class="crumb-name">No layer selected</strong>
+          </div>
+        </div>
+
+        <div id="raw-empty" class="raw-empty">Select a photo layer to adjust it.</div>
+        <div id="raw-body" class="raw-body"></div>
+
+        <div class="raw-foot">
+          <button id="btn-compare" type="button" class="btn btn-wide" title="Hold to see the original">
+            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="12" y1="3" x2="12" y2="21"/></svg>
+            Hold to compare
+          </button>
+          <div class="raw-actions">
+            <button id="btn-reset-adjust" type="button" class="btn btn-wide">Reset</button>
+            <button id="btn-auto" type="button" class="btn btn-primary btn-wide" title="Smart fix: sets light and a little color from the picture">
+              <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 4V2m0 14v-2M8 9h2m10 0h2M17.8 11.8L19 13M17.8 6.2L19 5M3 21l9-9M12.2 6.2L11 5"/></svg>
+              Auto
+            </button>
+          </div>
+        </div>
+      </section>
+    </aside>
+  </div>
+
+  <dialog id="new-dialog">
+    <form method="dialog" class="new-form">
+      <h3>Create artwork</h3>
+
+      <label class="field-row">
+        <span class="field-label">Name</span>
+        <input id="new-name" type="text" maxlength="60" value="Untitled artwork" autocomplete="off">
+      </label>
+
+      <div class="field-block">
+        <div class="field-title">Size</div>
+        <div id="preset-grid" class="preset-grid" role="group" aria-label="Artwork sizes"></div>
+      </div>
+
+      <div class="size-row">
+        <label>
+          <span class="field-label">Width (px)</span>
+          <input id="new-width" type="number" min="1" max="8000" value="1200" required>
+        </label>
+        <button id="btn-swap" type="button" class="btn btn-icon" title="Swap width and height" aria-label="Swap width and height">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+        </button>
+        <label>
+          <span class="field-label">Height (px)</span>
+          <input id="new-height" type="number" min="1" max="8000" value="800" required>
+        </label>
+      </div>
+
+      <div class="field-block">
+        <label class="field-row">
+          <span class="field-label">Background</span>
+          <input id="new-bg" type="color" value="#ffffff">
+        </label>
+        <label class="check">
+          <input id="new-transparent" type="checkbox">
+          Transparent background
+        </label>
+      </div>
+
+      <div class="dialog-actions">
+        <button value="create" type="submit" class="btn btn-primary">Create</button>
+        <button value="cancel" type="submit" class="btn" formnovalidate>Cancel</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="fonts-dialog">
+    <form method="dialog" class="new-form">
+      <h3>Fonts</h3>
+      <div class="font-actions">
+        <button id="btn-font-upload" type="button" class="btn">Upload font file</button>
+        <button id="btn-font-local" type="button" class="btn">Use fonts from this computer</button>
+        <input id="font-file" type="file" accept=".ttf,.otf,.woff,.woff2" multiple hidden>
+      </div>
+      <p id="font-note" class="font-note"></p>
+      <input id="font-search" type="search" placeholder="Search fonts" autocomplete="off" aria-label="Search fonts">
+      <ul id="font-list" class="font-list"></ul>
+      <div class="dialog-actions">
+        <button value="close" type="submit" class="btn">Close</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
