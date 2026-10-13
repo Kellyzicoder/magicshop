@@ -1039,6 +1039,7 @@
   const AB_MARGIN = 140;
   const AB_GAP = 80;
   let activeAbId = null;
+  let abSelected = false;   // the artboard itself (not a layer on it) is selected
 
   const abList = () => state.artboards || [];
   const isMulti = () => !!(state.doc.multi && abList().length);
@@ -1992,7 +1993,9 @@
 
     if (tool === 'select') {
       if (!sel.length) {
-        add(el('span', 'opt-hint', 'Click a layer, or drag a box to pick several. Hold Shift to add more.'));
+        add(el('span', 'opt-hint', isMulti()
+          ? 'Click a layer, or an artboard’s name to pick it. Alt + drag the name to copy it. Use the + buttons to add one.'
+          : 'Click a layer, or drag a box to pick several. Hold Shift to add more.'));
       } else {
         add(el('span', 'opt-label', sel.length > 1 ? 'Line up with each other' : 'Line up on the artwork'));
         add(seg(ALIGNS, null, alignSelected));
@@ -2168,6 +2171,7 @@
   }
 
   function renderSidePanels() {
+    if (sel.length) abSelected = false;
     const sl = selected();
     if (sl) {
       const a = abOf(sl);
@@ -2770,6 +2774,10 @@
 
   function updateCursor(p) {
     if (tool !== 'select') return;
+    if (isMulti() && (abPlusAt(p) || abLabelAt(p))) {
+      canvas.style.cursor = abPlusAt(p) ? 'pointer' : 'move';
+      return;
+    }
     const l = selected();
     let cursor = 'default';
     const handle = l && l.visible ? handleAt(l, p) : null;
@@ -3031,7 +3039,11 @@
     e.preventDefault();
     finishTextEdit();
     const p = toDoc(e);
-    if (tool === 'select') {
+    if (tool === 'select' && isMulti() && (abPlusAt(p) || abLabelAt(p))) {
+      const plus = abPlusAt(p);
+      if (plus) addArtboard(activeAb(), e.shiftKey, plus);
+      else pickArtboard(e, p, abLabelAt(p));
+    } else if (tool === 'select') {
       if (isMulti() && !hitTest(p)) {
         const a = abAt(p);
         if (a && a.id !== activeAbId) { activeAbId = a.id; renderToolOptions(); }
@@ -3187,6 +3199,17 @@
   // Double-click on text to edit it.
   canvas.addEventListener('dblclick', (e) => {
     if (tool !== 'select') return;
+    if (isMulti()) {
+      const lab = abLabelAt(toDoc(e));
+      if (lab) {
+        activeAbId = lab.id;
+        abSelected = true;
+        sel = [];
+        renderSidePanels();
+        zoomToRect(lab);
+        return;
+      }
+    }
     const hit = hitTest(toDoc(e), 'text');
     if (hit) startTextEdit(hit, snapshot());
   });
@@ -4221,44 +4244,87 @@
     return c;
   }
 
-  // Next free spot to the right of the last artboard.
-  function nextAbSpot(w) {
+  const overlaps = (r, list) => list.some((o) => r.x < o.x + o.width + AB_GAP / 2 && r.x + r.width > o.x - AB_GAP / 2 && r.y < o.y + o.height + AB_GAP / 2 && r.y + r.height > o.y - AB_GAP / 2);
+
+  // A free place next to `base`: to its right, or below it.
+  function freeSpot(base, dir) {
     const list = abList();
-    const right = Math.max(...list.map((a) => a.x + a.width));
-    const top = Math.min(...list.map((a) => a.y));
-    return { x: right + AB_GAP, y: top };
+    const r = { x: base.x, y: base.y, width: base.width, height: base.height };
+    for (let i = 0; i < 100; i++) {
+      if (dir === 'below') r.y += base.height + AB_GAP;
+      else r.x += base.width + AB_GAP;
+      if (!overlaps(r, list)) break;
+    }
+    return r;
   }
 
-  function addArtboard(src, withLayers) {
+  // Scrolls the view so a rectangle of the canvas is on screen (only if it is not already).
+  function revealRect(r) {
+    const wr = workspace.getBoundingClientRect();
+    const cr = canvas.getBoundingClientRect();
+    const x1 = cr.left + r.x * viewScale, y1 = cr.top + r.y * viewScale;
+    const x2 = x1 + r.width * viewScale, y2 = y1 + r.height * viewScale;
+    if (x1 >= wr.left && x2 <= wr.right && y1 >= wr.top && y2 <= wr.bottom) return;
+    workspace.scrollLeft += (x1 + x2) / 2 - (wr.left + wr.right) / 2;
+    workspace.scrollTop += (y1 + y2) / 2 - (wr.top + wr.bottom) / 2;
+    render();
+    drawRulers();
+  }
+
+  // Zooms to show one artboard big.
+  function zoomToRect(r) {
+    const wr = workspace.getBoundingClientRect();
+    fitMode = false;
+    viewScale = clamp(Math.min((wr.width - 100) / r.width, (wr.height - 200) / r.height), ZOOM_MIN, ZOOM_MAX);
+    applyScale();
+    const cr = canvas.getBoundingClientRect();
+    workspace.scrollLeft += cr.left + (r.x + r.width / 2) * viewScale - (wr.left + wr.width / 2);
+    workspace.scrollTop += cr.top + (r.y + r.height / 2) * viewScale - (wr.top + wr.height / 2 + 30);
+    render();
+    drawRulers();
+  }
+
+  // Makes a copy of an artboard (and what is on it). dir: 'right' / 'below' / 'here' (same place).
+  // Call inside change(), or between a snapshot and a commit. Returns { ab, ids }.
+  function copyArtboard(base, withLayers, dir) {
+    const spot = dir === 'here' ? { x: base.x, y: base.y } : freeSpot(base, dir);
+    const owned = withLayers ? ownedLayers(base) : [];
+    const a = {
+      id: nextAbId(),
+      name: withLayers ? base.name + ' copy' : 'Artboard ' + (abList().length + 1),
+      x: spot.x, y: spot.y, width: base.width, height: base.height,
+      background: base.background, transparent: !!base.transparent,
+    };
+    state.artboards.push(a);
+    const ids = [];
+    for (const l of owned) {
+      const c = cloneLayer(l);
+      c.x += a.x - base.x;
+      c.y += a.y - base.y;
+      state.layers.push(c);
+      ids.push(c.id);
+    }
+    return { ab: a, ids };
+  }
+
+  function addArtboard(src, withLayers, dir) {
     const base = src || activeAb();
     if (!base) return;
-    const spot = nextAbSpot(base.width);
-    if (spot.x + base.width + AB_MARGIN > MAX_DOC) {
+    const spot = freeSpot(base, dir || 'right');
+    if (spot.x + base.width + AB_MARGIN > MAX_DOC || spot.y + base.height + AB_MARGIN > MAX_DOC) {
       toast('No more room on this canvas. Make the artboards smaller, or delete one.');
       return;
     }
+    let made;
     change(() => {
-      const owned = withLayers ? ownedLayers(base) : [];
-      const a = {
-        id: nextAbId(),
-        name: withLayers ? base.name + ' copy' : 'Artboard ' + (abList().length + 1),
-        x: spot.x, y: spot.y, width: base.width, height: base.height,
-        background: base.background, transparent: !!base.transparent,
-      };
-      state.artboards.push(a);
-      const made = [];
-      for (const l of owned) {
-        const c = cloneLayer(l);
-        c.x += a.x - base.x;
-        c.y += a.y - base.y;
-        state.layers.push(c);
-        made.push(c.id);
-      }
-      activeAbId = a.id;
-      sel = made;
+      made = copyArtboard(base, withLayers, dir || 'right');
+      activeAbId = made.ab.id;
+      abSelected = true;
+      sel = [];
       fitPasteboard();
     });
-    toast('Added "' + activeAb().name + '".');
+    revealRect(made.ab);
+    toast('Added "' + made.ab.name + '".');
   }
 
   function deleteArtboard(a) {
@@ -4278,6 +4344,64 @@
     });
   }
 
+  function abLabelText(a) { return a.name + '  ' + a.width + ' × ' + a.height; }
+
+  // The name strip above an artboard (click it to pick the artboard, drag it to move it).
+  function abLabelAt(p) {
+    if (!isMulti()) return null;
+    const s = 1 / viewScale;
+    ctx.save();
+    ctx.font = '600 ' + 13 * s + 'px Inter, system-ui, sans-serif';
+    const list = abList();
+    let found = null;
+    for (let i = list.length - 1; i >= 0 && !found; i--) {
+      const a = list[i];
+      const w = Math.min(a.width, ctx.measureText(abLabelText(a)).width + 8 * s);
+      if (p.x >= a.x && p.x <= a.x + w && p.y >= a.y - 28 * s && p.y <= a.y) found = a;
+    }
+    ctx.restore();
+    return found;
+  }
+
+  // The little "+" buttons beside the active artboard.
+  function abPlusPos(a) {
+    const s = 1 / viewScale;
+    return {
+      right: { x: a.x + a.width + 26 * s, y: a.y + a.height / 2 },
+      below: { x: a.x + a.width / 2, y: a.y + a.height + 26 * s },
+    };
+  }
+
+  function abPlusAt(p) {
+    const a = activeAb();
+    if (!a || (tool !== 'select' && tool !== 'artboard')) return null;
+    const pos = abPlusPos(a);
+    const reach = 15 / viewScale;
+    for (const dir of ['right', 'below']) if (dist(p, pos[dir]) <= reach) return dir;
+    return null;
+  }
+
+  // Pick an artboard by its name and drag it. With Alt held, drag a copy instead.
+  function pickArtboard(e, p, a) {
+    const before = snapshot();
+    let target = a;
+    let owned = ownedLayers(a);
+    if (e.altKey) {
+      const made = copyArtboard(a, true, 'here');
+      target = made.ab;
+      owned = made.ids.map(getLayer).filter(Boolean);
+    }
+    activeAbId = target.id;
+    abSelected = true;
+    sel = [];
+    renderSidePanels();
+    startDrag(e, {
+      mode: 'abmove', id: target.id, start: p, before, orig: { x: target.x, y: target.y },
+      owned: owned.map((l) => ({ id: l.id, x: l.x, y: l.y })),
+    });
+    render();
+  }
+
   function downArtboard(e, p) {
     const cur = activeAb();
     const handle = cur ? abHandleAt(cur, p) : null;
@@ -4285,16 +4409,14 @@
       startDrag(e, { mode: 'abresize', id: cur.id, handle, before: snapshot(), orig: { x: cur.x, y: cur.y, w: cur.width, h: cur.height } });
       return;
     }
-    const a = abAt(p);
+    const plus = abPlusAt(p);
+    if (plus) {
+      addArtboard(cur, e.shiftKey, plus);
+      return;
+    }
+    const a = abLabelAt(p) || abAt(p);
     if (a) {
-      activeAbId = a.id;
-      sel = [];
-      renderSidePanels();
-      startDrag(e, {
-        mode: 'abmove', id: a.id, start: p, before: snapshot(), orig: { x: a.x, y: a.y },
-        owned: ownedLayers(a).map((l) => ({ id: l.id, x: l.x, y: l.y })),
-      });
-      render();
+      pickArtboard(e, p, a);
       return;
     }
     startDrag(e, { mode: 'abnew', start: p, before: snapshot(), made: null });
@@ -4308,6 +4430,7 @@
         d.made = { id: nextAbId(), name: 'Artboard ' + (abList().length + 1), x: 0, y: 0, width: 0, height: 0, background: '#ffffff', transparent: false };
         state.artboards.push(d.made);
         activeAbId = d.made.id;
+        abSelected = true;
         sel = [];
       }
       const a = d.made;
@@ -4360,7 +4483,7 @@
     ctx.textBaseline = 'bottom';
     for (const a of abList()) {
       ctx.fillStyle = a === act ? colors.accent : 'rgba(255,255,255,0.75)';
-      let label = a.name + '  ' + a.width + ' × ' + a.height;
+      const label = abLabelText(a);
       ctx.save();
       ctx.beginPath();
       ctx.rect(a.x, a.y - 30 * s, a.width, 30 * s);
@@ -4369,9 +4492,27 @@
       ctx.restore();
     }
     if (act) {
-      ctx.lineWidth = 2 * s;
+      ctx.lineWidth = (abSelected ? 4 : 2) * s;
       ctx.strokeStyle = colors.accent;
       ctx.strokeRect(act.x, act.y, act.width, act.height);
+      if (!drag && (tool === 'select' || tool === 'artboard')) {
+        const pos = abPlusPos(act);
+        for (const dir of ['right', 'below']) {
+          const c = pos[dir];
+          ctx.beginPath();
+          ctx.arc(c.x, c.y, 13 * s, 0, Math.PI * 2);
+          ctx.fillStyle = colors.accent;
+          ctx.fill();
+          ctx.lineWidth = 2.5 * s;
+          ctx.strokeStyle = '#ffffff';
+          ctx.beginPath();
+          ctx.moveTo(c.x - 6 * s, c.y); ctx.lineTo(c.x + 6 * s, c.y);
+          ctx.moveTo(c.x, c.y - 6 * s); ctx.lineTo(c.x, c.y + 6 * s);
+          ctx.stroke();
+        }
+        ctx.lineWidth = (abSelected ? 4 : 2) * s;
+        ctx.strokeStyle = colors.accent;
+      }
       if (tool === 'artboard') {
         const hs = HANDLE_PX * s;
         ctx.fillStyle = '#ffffff';
@@ -4685,7 +4826,8 @@
       redo();
     } else if (mod && key === 'd') {
       e.preventDefault();
-      if (sel.length) duplicateLayers(sel.slice());
+      if (isMulti() && !sel.length && abSelected) addArtboard(activeAb(), true, 'right');
+      else if (sel.length) duplicateLayers(sel.slice());
     } else if (mod) {
       return;
     } else if (tool === 'crop' && cropBox && e.key === 'Enter') {
@@ -4711,7 +4853,7 @@
       render();
     } else if (e.key === 'Delete' || e.key === 'Backspace') {
       e.preventDefault();
-      if (tool === 'artboard') deleteArtboard(activeAb());
+      if (isMulti() && !sel.length && (tool === 'artboard' || (tool === 'select' && abSelected))) deleteArtboard(activeAb());
       else if (tool === 'marquee' && marq) marqueeOp('erase');
       else if (sel.length) deleteLayers(sel.slice());
     } else if (e.key.startsWith('Arrow') && sel.length && !(t instanceof HTMLInputElement)) {
