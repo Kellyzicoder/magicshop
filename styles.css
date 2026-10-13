@@ -976,3 +976,6 @@ select[hidden] { display: none; }
 .tw-head { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px 8px 14px; cursor: grab; border-bottom: 1px solid var(--border); user-select: none; }
 .tw-title { font-weight: 600; font-size: 13px; }
 .tab-window .tab-body { overflow: auto; }
+
+.preset-tabs { flex-wrap: wrap; margin-bottom: 10px; }
+.preset-grid { max-height: 300px; overflow-y: auto; padding-right: 4px; }

@@ -1036,7 +1036,7 @@
   // With "Artboards" ticked, the canvas is a big pasteboard holding several pages. A layer belongs
   // to the artboard its centre is on, and is cut off at that artboard's edge.
 
-  const AB_MARGIN = 140;
+  const AB_MARGIN = 200;
   const AB_GAP = 80;
   let activeAbId = null;
   let abSelected = false;   // the artboard itself (not a layer on it) is selected
@@ -1361,6 +1361,7 @@
     fitMode = true;
     applyScale();
     centerView();
+    if (isMulti()) workspace.scrollTop -= 40; // keep the artboard names clear of the tool bar
   }
 
   // Zoom, keeping the spot under (clientX, clientY) where it is on screen.
@@ -4096,15 +4097,85 @@
 
   // ---------- Create artwork ----------
 
-  const PRESETS = [
-    { name: 'Instagram post', w: 1080, h: 1080 },
-    { name: 'Instagram story', w: 1080, h: 1920 },
-    { name: 'Poster A4 (300 dpi)', w: 2480, h: 3508 },
-    { name: 'Poster A3 (300 dpi)', w: 3508, h: 4961 },
-    { name: 'YouTube thumbnail', w: 1280, h: 720 },
-    { name: 'Wallpaper (Full HD)', w: 1920, h: 1080 },
-    { name: 'LinkedIn banner', w: 1584, h: 396 },
+  // Sizes in pixels. Print sizes are at 300 dpi. (The biggest side we allow is 8000 px.)
+  const PRESET_GROUPS = [
+    { name: 'Popular', items: [
+      { name: 'Instagram post', w: 1080, h: 1080 },
+      { name: 'Instagram story', w: 1080, h: 1920 },
+      { name: 'Poster A4 (300 dpi)', w: 2480, h: 3508 },
+      { name: 'Poster A3 (300 dpi)', w: 3508, h: 4961 },
+      { name: 'YouTube thumbnail', w: 1280, h: 720 },
+      { name: 'Wallpaper (Full HD)', w: 1920, h: 1080 },
+      { name: 'LinkedIn banner', w: 1584, h: 396 },
+    ] },
+    { name: 'Print', items: [
+      { name: 'A6', w: 1240, h: 1748 },
+      { name: 'A5', w: 1748, h: 2480 },
+      { name: 'A4', w: 2480, h: 3508 },
+      { name: 'A3', w: 3508, h: 4961 },
+      { name: 'A2', w: 4961, h: 7016 },
+      { name: 'US Letter', w: 2550, h: 3300 },
+      { name: 'US Legal', w: 2550, h: 4200 },
+      { name: 'Tabloid 11 × 17 in', w: 3300, h: 5100 },
+      { name: 'Poster 18 × 24 in', w: 5400, h: 7200 },
+      { name: 'Postcard 4 × 6 in', w: 1200, h: 1800 },
+      { name: 'Flyer DL', w: 1181, h: 2362 },
+      { name: 'Business card', w: 1050, h: 600 },
+    ] },
+    { name: 'Photo', items: [
+      { name: '4 × 6 in', w: 1800, h: 1200 },
+      { name: '5 × 7 in', w: 2100, h: 1500 },
+      { name: '8 × 10 in', w: 3000, h: 2400 },
+      { name: 'Square', w: 3000, h: 3000 },
+      { name: '3:2 camera', w: 6000, h: 4000 },
+      { name: '4:3 camera', w: 4000, h: 3000 },
+      { name: '16:9', w: 3840, h: 2160 },
+    ] },
+    { name: 'Social', items: [
+      { name: 'Instagram post', w: 1080, h: 1080 },
+      { name: 'Instagram portrait', w: 1080, h: 1350 },
+      { name: 'Instagram / TikTok story', w: 1080, h: 1920 },
+      { name: 'Facebook post', w: 1200, h: 630 },
+      { name: 'Facebook cover', w: 820, h: 312 },
+      { name: 'X (Twitter) post', w: 1600, h: 900 },
+      { name: 'X (Twitter) header', w: 1500, h: 500 },
+      { name: 'LinkedIn banner', w: 1584, h: 396 },
+      { name: 'YouTube thumbnail', w: 1280, h: 720 },
+      { name: 'YouTube channel art', w: 2560, h: 1440 },
+      { name: 'Pinterest pin', w: 1000, h: 1500 },
+    ] },
+    { name: 'Web', items: [
+      { name: 'Web large', w: 1920, h: 1080 },
+      { name: 'Web medium', w: 1366, h: 768 },
+      { name: 'Web small', w: 1024, h: 768 },
+      { name: 'Laptop', w: 1440, h: 900 },
+      { name: 'Desktop 2K', w: 2560, h: 1440 },
+      { name: 'Email header', w: 600, h: 200 },
+      { name: 'App icon', w: 1024, h: 1024 },
+      { name: 'Favicon', w: 512, h: 512 },
+    ] },
+    { name: 'Mobile', items: [
+      { name: 'iPhone 16 Pro', w: 1206, h: 2622 },
+      { name: 'iPhone 16 Pro Max', w: 1320, h: 2868 },
+      { name: 'iPhone 15', w: 1179, h: 2556 },
+      { name: 'iPhone SE', w: 750, h: 1334 },
+      { name: 'Android (FHD+)', w: 1080, h: 2400 },
+      { name: 'Galaxy S', w: 1440, h: 3120 },
+      { name: 'iPad Pro 11 in', w: 1668, h: 2420 },
+      { name: 'iPad Pro 13 in', w: 2064, h: 2752 },
+      { name: 'iPad', w: 1536, h: 2048 },
+    ] },
+    { name: 'Video', items: [
+      { name: 'HD 720p', w: 1280, h: 720 },
+      { name: 'Full HD 1080p', w: 1920, h: 1080 },
+      { name: 'Vertical HD', w: 1080, h: 1920 },
+      { name: '2K', w: 2048, h: 1080 },
+      { name: '4K UHD', w: 3840, h: 2160 },
+      { name: 'Cinema 4K', w: 4096, h: 2160 },
+      { name: 'Ultrawide', w: 2560, h: 1080 },
+    ] },
   ];
+  let presetGroup = 0;
 
   const presetGrid = $('preset-grid');
   const newName = $('new-name');
@@ -4119,21 +4190,37 @@
     });
   }
 
-  for (const p of PRESETS) {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'preset';
-    b.dataset.w = String(p.w);
-    b.dataset.h = String(p.h);
-    const name = document.createElement('span');
-    name.className = 'preset-name';
-    name.textContent = p.name;
-    const size = document.createElement('span');
-    size.className = 'preset-size';
-    size.textContent = p.w + ' × ' + p.h;
-    b.append(name, size);
-    presetGrid.append(b);
+  const presetTabs = $('preset-tabs');
+
+  function renderPresets() {
+    presetTabs.textContent = '';
+    PRESET_GROUPS.forEach((g, i) => {
+      const t = document.createElement('button');
+      t.type = 'button';
+      t.textContent = g.name;
+      t.className = i === presetGroup ? 'on' : '';
+      t.addEventListener('click', () => { presetGroup = i; renderPresets(); });
+      presetTabs.append(t);
+    });
+    presetGrid.textContent = '';
+    for (const p of PRESET_GROUPS[presetGroup].items) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'preset';
+      b.dataset.w = String(p.w);
+      b.dataset.h = String(p.h);
+      const name = document.createElement('span');
+      name.className = 'preset-name';
+      name.textContent = p.name;
+      const size = document.createElement('span');
+      size.className = 'preset-size';
+      size.textContent = p.w + ' × ' + p.h;
+      b.append(name, size);
+      presetGrid.append(b);
+    }
+    markPreset();
   }
+  renderPresets();
 
   presetGrid.addEventListener('click', (e) => {
     const b = e.target.closest('.preset');
@@ -4194,6 +4281,7 @@
 
   const nextAbId = () => 'ab-' + (Math.max(0, ...abList().map((a) => Number(a.id.slice(3)) || 0)) + 1);
   const AB_MIN = 16;
+  const AB_TOP = 40; // room above an artboard for its name tab
   const AB_HANDLES = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
 
   function abHandlePos(a, name) {
@@ -4356,7 +4444,7 @@
     let found = null;
     for (let i = list.length - 1; i >= 0 && !found; i--) {
       const a = list[i];
-      const w = Math.min(a.width, ctx.measureText(abLabelText(a)).width + 8 * s);
+      const w = ctx.measureText(abLabelText(a)).width + 8 * s;
       if (p.x >= a.x && p.x <= a.x + w && p.y >= a.y - 28 * s && p.y <= a.y) found = a;
     }
     ctx.restore();
@@ -4366,9 +4454,10 @@
   // The little "+" buttons beside the active artboard.
   function abPlusPos(a) {
     const s = 1 / viewScale;
+    const off = Math.max(10 * s, Math.min(26 * s, AB_MARGIN - 14 * s)); // stay on the canvas when zoomed out
     return {
-      right: { x: a.x + a.width + 26 * s, y: a.y + a.height / 2 },
-      below: { x: a.x + a.width / 2, y: a.y + a.height + 26 * s },
+      right: { x: a.x + a.width + off, y: a.y + a.height / 2 },
+      below: { x: a.x + a.width / 2, y: a.y + a.height + off },
     };
   }
 
@@ -4435,7 +4524,7 @@
       }
       const a = d.made;
       a.x = Math.round(Math.max(0, Math.min(d.start.x, p.x)));
-      a.y = Math.round(Math.max(0, Math.min(d.start.y, p.y)));
+      a.y = Math.round(Math.max(AB_TOP, Math.min(d.start.y, p.y)));
       a.width = Math.max(AB_MIN, Math.round(Math.abs(p.x - d.start.x)));
       a.height = Math.max(AB_MIN, Math.round(Math.abs(p.y - d.start.y)));
       growCanvasLive();
@@ -4443,7 +4532,7 @@
       const a = getAb(d.id);
       if (!a) return;
       const nx = Math.max(0, Math.round(d.orig.x + p.x - d.start.x));
-      const ny = Math.max(0, Math.round(d.orig.y + p.y - d.start.y));
+      const ny = Math.max(AB_TOP, Math.round(d.orig.y + p.y - d.start.y));
       const dx = nx - d.orig.x, dy = ny - d.orig.y;
       a.x = nx;
       a.y = ny;
@@ -4458,7 +4547,7 @@
       let x1 = d.orig.x, y1 = d.orig.y, x2 = d.orig.x + d.orig.w, y2 = d.orig.y + d.orig.h;
       if (d.handle.includes('w')) x1 = Math.min(Math.max(0, Math.round(p.x)), x2 - AB_MIN);
       if (d.handle.includes('e')) x2 = Math.max(Math.round(p.x), x1 + AB_MIN);
-      if (d.handle.includes('n')) y1 = Math.min(Math.max(0, Math.round(p.y)), y2 - AB_MIN);
+      if (d.handle.includes('n')) y1 = Math.min(Math.max(AB_TOP, Math.round(p.y)), y2 - AB_MIN);
       if (d.handle.includes('s')) y2 = Math.max(Math.round(p.y), y1 + AB_MIN);
       a.x = x1; a.y = y1; a.width = x2 - x1; a.height = y2 - y1;
       growCanvasLive();
@@ -4484,12 +4573,7 @@
     for (const a of abList()) {
       ctx.fillStyle = a === act ? colors.accent : 'rgba(255,255,255,0.75)';
       const label = abLabelText(a);
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(a.x, a.y - 30 * s, a.width, 30 * s);
-      ctx.clip();
       ctx.fillText(label, a.x, a.y - 6 * s);
-      ctx.restore();
     }
     if (act) {
       ctx.lineWidth = (abSelected ? 4 : 2) * s;
@@ -4541,8 +4625,11 @@
       add(w);
     };
     f('Name', name);
-    f('Width', numberInput(a.width, AB_MIN, MAX_DOC - 2 * AB_MARGIN, (v) => change(() => { a.width = v; fitPasteboard(); })));
-    f('Height', numberInput(a.height, AB_MIN, MAX_DOC - 2 * AB_MARGIN, (v) => change(() => { a.height = v; fitPasteboard(); })));
+    const wIn = numberInput(a.width, AB_MIN, MAX_DOC - 2 * AB_MARGIN, (v) => change(() => { a.width = v; fitPasteboard(); }));
+    const hIn = numberInput(a.height, AB_MIN, MAX_DOC - 2 * AB_MARGIN, (v) => change(() => { a.height = v; fitPasteboard(); }));
+    wIn.style.width = hIn.style.width = '84px'; // 4-digit sizes need room
+    f('Width', wIn);
+    f('Height', hIn);
     const bg = el('input');
     bg.type = 'color';
     bg.value = a.background || '#ffffff';
@@ -4551,11 +4638,19 @@
     f('Color', bg);
     const preset = el('select');
     preset.append(new Option('Size…', ''));
-    PRESETS.forEach((pr, i) => preset.append(new Option(pr.name + '  ' + pr.w + '×' + pr.h, String(i))));
+    PRESET_GROUPS.forEach((g, gi) => {
+      if (g.name === 'Popular') return;
+      const og = document.createElement('optgroup');
+      og.label = g.name;
+      g.items.forEach((pr, i) => og.append(new Option(pr.name + '  ' + pr.w + '×' + pr.h, gi + ':' + i)));
+      preset.append(og);
+    });
     preset.addEventListener('change', () => {
-      const pr = PRESETS[Number(preset.value)];
+      const [gi, i] = preset.value.split(':').map(Number);
+      const pr = PRESET_GROUPS[gi] && PRESET_GROUPS[gi].items[i];
       if (pr) change(() => { a.width = Math.min(pr.w, MAX_DOC - 2 * AB_MARGIN); a.height = Math.min(pr.h, MAX_DOC - 2 * AB_MARGIN); fitPasteboard(); });
     });
+    preset.style.width = '130px';
     add(preset);
     add(el('span', 'opt-sep'));
     add(actionButton('+ Add', 'Add an empty artboard next to this one', false, () => addArtboard(a, false)));
