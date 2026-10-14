@@ -111,6 +111,10 @@
         <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 3v18M17 3v18M3 7h18M3 17h18"/></svg>
       </button>
 
+      <button type="button" class="rail-btn" data-tool="cutout" title="Remove background (X)" aria-label="Remove background tool">
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="3.2"/><path d="M5.5 20c.6-3.6 3.2-5.6 6.5-5.6s5.9 2 6.5 5.6"/><path d="M3 3h3M3 3v3M21 3h-3M21 3v3M3 21h3M3 21v-3M21 21h-3M21 21v-3" stroke-width="1.4"/></svg>
+      </button>
+
       <button type="button" class="rail-btn" data-tool="warp" title="Skew, perspective, distort (D)" aria-label="Distort tool">
         <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7l5-3 13 2-3 13-14 1z"/><circle cx="3" cy="7" r="1.2" fill="currentColor"/><circle cx="8" cy="4" r="1.2" fill="currentColor"/><circle cx="21" cy="6" r="1.2" fill="currentColor"/><circle cx="18" cy="19" r="1.2" fill="currentColor"/><circle cx="4" cy="20" r="1.2" fill="currentColor"/></svg>
       </button>
@@ -192,6 +196,8 @@
           <label for="blend">Blend</label>
           <select id="blend" disabled aria-label="Blend mode"></select>
         </div>
+
+        <div id="mask-row" class="mask-row" hidden></div>
 
         <ul id="layer-list" class="layer-list"></ul>
 
