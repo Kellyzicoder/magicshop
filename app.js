@@ -5188,7 +5188,21 @@
 
   const slug = (t) => (t || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 
-  function saveBlob(blob, filename) {
+  async function saveBlob(blob, filename) {
+    // In the desktop app, ask where to save (the app window cannot do normal browser downloads).
+    const tauri = window.__TAURI__;
+    if (tauri && tauri.dialog && tauri.fs) {
+      try {
+        const path = await tauri.dialog.save({ defaultPath: filename });
+        if (path) {
+          await tauri.fs.writeFile(path, new Uint8Array(await blob.arrayBuffer()));
+          toast('Saved.');
+        }
+      } catch (err) {
+        toast('Could not save the file: ' + (err && err.message ? err.message : err));
+      }
+      return;
+    }
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
