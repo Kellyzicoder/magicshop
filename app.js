@@ -1388,6 +1388,7 @@
 
   function regionPath(m) {
     const p = new Path2D();
+    if (m.kind === 'path') return m.path;
     if (m.kind === 'ellipse') p.ellipse(m.x + m.w / 2, m.y + m.h / 2, m.w / 2, m.h / 2, 0, 0, Math.PI * 2);
     else p.rect(m.x, m.y, m.w, m.h);
     return p;
@@ -1410,7 +1411,7 @@
 
     if (marq && marq.w > 0 && marq.h > 0) {
       // "Marching ants": a dashed line, white over black so it shows on any picture.
-      const path = regionPath(marq);
+      const path = marq.outline || regionPath(marq);
       ctx.save();
       ctx.lineWidth = s;
       ctx.setLineDash([5 * s, 5 * s]);
@@ -2219,10 +2220,12 @@
         add(actionButton('Flip ↔', 'Flip left to right', false, () => flipSelected('x')));
         add(actionButton('Flip ↕', 'Flip top to bottom', false, () => flipSelected('y')));
       }
+    } else if (tool === 'wand') {
+      wandOptions(add);
     } else if (tool === 'marquee') {
       add(seg([{ value: 'rect', label: 'Rectangle' }, { value: 'ellipse', label: 'Ellipse' }], marqKind, (v) => {
         marqKind = v;
-        if (marq) marq.kind = v;
+        if (marq && marq.kind !== 'path') marq.kind = v;
         renderToolOptions();
         render();
       }));
@@ -3129,6 +3132,117 @@
     }
   }
 
+  // ---------- Magic wand ----------
+  // Click a colour and everything like it (and touching it) is selected.
+  const wandOpts = { tolerance: 30, touching: true };
+
+  function wandSelect(l, p, add) {
+    const r = rasterize(l);
+    const W = r.canvas.width, H = r.canvas.height;
+    const px = Math.floor((p.x - l.x) * r.sx), py = Math.floor((p.y - l.y) * r.sy);
+    if (px < 0 || py < 0 || px >= W || py >= H) { toast('Click on the selected layer.'); return; }
+    const d = r.canvas.getContext('2d').getImageData(0, 0, W, H).data;
+    const N = W * H;
+    const si = (py * W + px) * 4;
+    const sr = d[si], sg = d[si + 1], sb = d[si + 2], sa = d[si + 3];
+    const lim = wandOpts.tolerance * 2.55;
+    const like = (i) => {
+      const k = i * 4;
+      return Math.max(Math.abs(d[k] - sr), Math.abs(d[k + 1] - sg), Math.abs(d[k + 2] - sb), Math.abs(d[k + 3] - sa)) <= lim;
+    };
+    let mask = new Uint8Array(N);
+    if (wandOpts.touching) {
+      const stack = [py * W + px];
+      mask[stack[0]] = 1;
+      while (stack.length) {
+        const i = stack.pop();
+        const x = i % W;
+        let j;
+        if (x > 0 && !mask[j = i - 1] && like(j)) { mask[j] = 1; stack.push(j); }
+        if (x < W - 1 && !mask[j = i + 1] && like(j)) { mask[j] = 1; stack.push(j); }
+        if (i >= W && !mask[j = i - W] && like(j)) { mask[j] = 1; stack.push(j); }
+        if (i < N - W && !mask[j = i + W] && like(j)) { mask[j] = 1; stack.push(j); }
+      }
+    } else {
+      for (let i = 0; i < N; i++) if (like(i)) mask[i] = 1;
+    }
+    const old = marq && marq.pix;
+    if (add && old && old.id === l.id && old.w === W && old.h === H && old.x === l.x && old.y === l.y) {
+      for (let i = 0; i < N; i++) if (old.data[i]) mask[i] = 1;
+    }
+    setWandSelection(l, r, mask, W, H);
+  }
+
+  function setWandSelection(l, r, mask, W, H) {
+    let x1 = W, y1 = H, x2 = -1, y2 = -1;
+    const fill = new Path2D(), edge = new Path2D();
+    const X = (x) => l.x + x / r.sx, Y = (y) => l.y + y / r.sy;
+    for (let y = 0; y < H; y++) {
+      let x = 0;
+      while (x < W) {
+        if (!mask[y * W + x]) { x++; continue; }
+        const a = x;
+        while (x < W && mask[y * W + x]) x++;
+        fill.rect(X(a), Y(y), (x - a) / r.sx, 1 / r.sy);
+        if (a < x1) x1 = a; if (x > x2) x2 = x; if (y < y1) y1 = y; if (y + 1 > y2) y2 = y + 1;
+      }
+    }
+    // outline: only the edges between picked and not picked pixels, joined into long lines
+    const at = (x, y) => (x >= 0 && y >= 0 && x < W && y < H && mask[y * W + x] ? 1 : 0);
+    for (let y = 0; y <= H; y++) {
+      let a = -1, b = -1;
+      for (let x = 0; x <= W; x++) {
+        const e = at(x, y) !== at(x, y - 1);
+        if (e && a < 0) a = x;
+        if ((!e || x === W) && a >= 0) { edge.moveTo(X(a), Y(y)); edge.lineTo(X(e ? x + 1 : x), Y(y)); a = -1; }
+      }
+    }
+    for (let x = 0; x <= W; x++) {
+      let a = -1;
+      for (let y = 0; y <= H; y++) {
+        const e = at(x, y) !== at(x - 1, y);
+        if (e && a < 0) a = y;
+        if ((!e || y === H) && a >= 0) { edge.moveTo(X(x), Y(a)); edge.lineTo(X(x), Y(e ? y + 1 : y)); a = -1; }
+      }
+    }
+    marq = {
+      kind: 'path', x: X(x1), y: Y(y1), w: (x2 - x1) / r.sx, h: (y2 - y1) / r.sy,
+      path: fill, outline: edge, pix: { id: l.id, w: W, h: H, x: l.x, y: l.y, data: mask },
+    };
+    renderToolOptions();
+    renderMaskRow();
+    render();
+  }
+
+  function downWand(e, p) {
+    const l = selected();
+    if (!l || !l.visible) { toast('Click a layer first, then click a colour on it.'); return; }
+    if (l.rotation || l.warp) { toast('Set the rotation back to 0 and reset any bend first.'); return; }
+    wandSelect(l, p, e.shiftKey);
+  }
+
+  function wandOptions(add) {
+    const w = el('span', 'opt-field');
+    const input = el('input');
+    input.type = 'range'; input.min = '0'; input.max = '100';
+    input.value = String(wandOpts.tolerance);
+    const out = el('span', 'opt-hint', String(wandOpts.tolerance));
+    input.addEventListener('input', () => { wandOpts.tolerance = Number(input.value); out.textContent = input.value; });
+    w.append(el('span', 'opt-label', 'Strength'), input, out);
+    add(w);
+    add(seg([{ value: 'near', label: 'Touching' }, { value: 'all', label: 'Everywhere' }], wandOpts.touching ? 'near' : 'all', (v) => {
+      wandOpts.touching = v === 'near';
+      renderToolOptions();
+    }));
+    add(el('span', 'opt-sep'));
+    const has = !!marq;
+    add(actionButton('Copy to new layer', 'Copy the area to a new layer', !has, () => marqueeOp('copy')));
+    add(actionButton('Cut to new layer', 'Move the area to a new layer', !has, () => marqueeOp('cut')));
+    add(actionButton('Erase', 'Delete the pixels in the area (Delete key)', !has, () => marqueeOp('erase')));
+    add(actionButton('Deselect', 'Remove the area (Esc)', !has, () => { marq = null; renderToolOptions(); renderMaskRow(); render(); }));
+    if (!has) add(el('span', 'opt-hint', 'Click a colour on the layer. Hold Shift to add more.'));
+  }
+
   function downMarquee(e, p) {
     marq = { kind: marqKind, x: p.x, y: p.y, w: 0, h: 0 };
     startDrag(e, { mode: 'marq', start: p });
@@ -3315,6 +3429,7 @@
       downSelect(e, p);
     }
     else if (tool === 'marquee') downMarquee(e, p);
+    else if (tool === 'wand') downWand(e, p);
     else if (tool === 'text') downText(e, p);
     else if (tool === 'shape') downShape(e, p);
     else if (tool === 'pen') downPen(e, p);
@@ -5459,7 +5574,7 @@
       if (tool === 'cutout' && cutout) endCutout(true);
       finishTextEdit();
       if (penDraft) finishPen(false, false);
-      if (name !== 'marquee') marq = null;
+      if (name !== 'marquee' && name !== 'wand') marq = null;
       cropBox = null;
       hoverPt = null;
       gradDraft = null;
@@ -5534,7 +5649,7 @@
 
   // ---------- Keyboard ----------
 
-  const TOOL_KEYS = { v: 'select', m: 'marquee', c: 'crop', t: 'text', u: 'shape', p: 'pen', b: 'brush', e: 'eraser', k: 'bucket', g: 'gradient', i: 'eyedropper', d: 'warp', h: 'hand', a: 'artboard', x: 'cutout' };
+  const TOOL_KEYS = { v: 'select', m: 'marquee', c: 'crop', t: 'text', u: 'shape', p: 'pen', b: 'brush', e: 'eraser', k: 'bucket', g: 'gradient', i: 'eyedropper', d: 'warp', h: 'hand', a: 'artboard', x: 'cutout', w: 'wand' };
 
   document.addEventListener('keydown', (e) => {
     if (newDialog.open || fontsDialog.open) return;
@@ -5592,7 +5707,7 @@
     } else if (e.key === 'Delete' || e.key === 'Backspace') {
       e.preventDefault();
       if (isMulti() && !sel.length && (tool === 'artboard' || (tool === 'select' && abSelected))) deleteArtboard(activeAb());
-      else if (tool === 'marquee' && marq) marqueeOp('erase');
+      else if ((tool === 'marquee' || tool === 'wand') && marq) marqueeOp('erase');
       else if (sel.length) deleteLayers(sel.slice());
     } else if (e.key.startsWith('Arrow') && sel.length && !(t instanceof HTMLInputElement)) {
       e.preventDefault();
