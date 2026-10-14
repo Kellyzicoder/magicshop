@@ -5593,6 +5593,8 @@
     document.querySelectorAll('.rail-btn[data-tool]').forEach((b) => {
       b.classList.toggle('tool-active', b.dataset.tool === name);
     });
+    if (typeof showInGroup === 'function') showInGroup(name);
+    if (typeof closeFlyout === 'function') closeFlyout();
     updatePanClasses();
     renderToolOptions();
     renderFloatBar();
@@ -5602,6 +5604,90 @@
   document.querySelectorAll('.rail-btn[data-tool]').forEach((b) => {
     b.addEventListener('click', () => setTool(b.dataset.tool));
   });
+
+  // ---------- Tool groups ----------
+  // Like Photoshop: tools that belong together share one rail button.
+  // The button shows the last tool you used; hold it, right-click it, or click
+  // the small corner mark to see the others.
+  const TOOL_GROUPS = [
+    ['select', 'artboard', 'warp'],
+    ['eraser', 'cutout'],
+    ['gradient', 'bucket'],
+  ];
+  const groupOf = {};
+  const flyout = el('div', 'tool-flyout');
+  flyout.hidden = true;
+  document.body.append(flyout);
+  let flyGroup = null;
+
+  function closeFlyout() {
+    if (!flyGroup) return;
+    flyout.hidden = true;
+    flyGroup = null;
+  }
+
+  function openFlyout(g) {
+    flyout.replaceChildren();
+    for (const name of g.tools) {
+      const src = document.querySelector('.rail-btn[data-tool="' + name + '"]');
+      if (src.hidden) continue;
+      const m = src.title.match(/^(.*?)\s*\((\w)\b/);
+      const item = el('button', 'tool-fly-item' + (name === tool ? ' on' : ''));
+      item.type = 'button';
+      item.innerHTML = src.innerHTML;
+      item.append(el('span', 'tool-fly-name', m ? m[1] : src.title), el('span', 'tool-fly-key', m ? m[2] : ''));
+      item.addEventListener('click', () => { closeFlyout(); setTool(name); });
+      flyout.append(item);
+    }
+    const r = g.box.getBoundingClientRect();
+    flyout.hidden = false;
+    const fw = flyout.offsetWidth, fh = flyout.offsetHeight;
+    let left = r.right + 8, top = r.top;
+    if (left + fw > innerWidth - 8) { left = Math.max(8, r.left); top = r.bottom + 8; }
+    if (top + fh > innerHeight - 8) top = Math.max(8, innerHeight - 8 - fh);
+    flyout.style.left = left + 'px';
+    flyout.style.top = top + 'px';
+    flyGroup = g;
+  }
+
+  function showInGroup(name) {
+    const g = groupOf[name];
+    if (!g) return;
+    for (const b of g.btns) b.classList.toggle('g-off', b.dataset.tool !== name);
+  }
+
+  for (const tools of TOOL_GROUPS) {
+    const btns = tools.map((t) => document.querySelector('.rail-btn[data-tool="' + t + '"]')).filter(Boolean);
+    if (btns.length < 2) continue;
+    const box = el('div', 'tool-group');
+    btns[0].before(box);
+    box.append(...btns);
+    const caret = el('span', 'tool-caret');
+    caret.title = 'More tools';
+    box.append(caret);
+    const g = { tools, btns, box };
+    for (const t of tools) groupOf[t] = g;
+    showInGroup(tools[0]);
+    const toggle = () => (flyGroup === g ? closeFlyout() : openFlyout(g));
+    caret.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); toggle(); });
+    box.addEventListener('contextmenu', (e) => { e.preventDefault(); openFlyout(g); });
+    let hold = 0, held = false;
+    box.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      held = false;
+      hold = setTimeout(() => { hold = 0; held = true; openFlyout(g); }, 350);
+    });
+    // after a long press, letting go keeps the list open instead of picking the tool
+    box.addEventListener('click', (e) => { if (held) { held = false; e.stopPropagation(); } }, true);
+    const stop = () => { if (hold) { clearTimeout(hold); hold = 0; } };
+    box.addEventListener('pointerup', stop);
+    box.addEventListener('pointerleave', stop);
+  }
+
+  document.addEventListener('pointerdown', (e) => {
+    if (flyGroup && !flyout.contains(e.target) && !flyGroup.box.contains(e.target)) closeFlyout();
+  });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeFlyout(); });
 
   // Capture phase: runs before the canvas gets the click, so panning never moves a layer.
   workspace.addEventListener('pointerdown', (e) => {
@@ -5733,7 +5819,14 @@
         toast('Make a new file with “Artboards” ticked to use artboards.');
         return;
       }
-      setTool(TOOL_KEYS[key]);
+      let next = TOOL_KEYS[key];
+      // Shift + the letter steps through the tools that share a button (like Photoshop)
+      const g = e.shiftKey && groupOf[next];
+      if (g && g.tools.includes(tool)) {
+        const list = g.tools.filter((t) => !document.querySelector('.rail-btn[data-tool="' + t + '"]').hidden);
+        next = list[(list.indexOf(tool) + 1) % list.length];
+      }
+      setTool(next);
     }
   });
 
