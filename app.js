@@ -1002,6 +1002,50 @@
 
   // `plain` draws the layer with no opacity and no blend mode (used when copying its pixels).
   function drawLayer(g, l, tier, plain) {
+    const m = l.mask && l.mask.on !== false ? images.get(l.mask.img) : null;
+    if (m) drawMasked(g, l, tier, plain, m);
+    else drawLayerRaw(g, l, tier, plain);
+  }
+
+  // ----- Layer masks -----
+  // A mask is a hidden picture on a layer: where it is solid the layer shows, where it is clear the
+  // layer is hidden. It lives in the layer's own space, so it moves, resizes and turns with the layer.
+
+  let maskTmp = null;
+
+  function drawMasked(g, l, tier, plain, m) {
+    const b = layerBounds(l);
+    const x0 = Math.max(0, Math.floor(b.x) - 3), y0 = Math.max(0, Math.floor(b.y) - 3);
+    const x1 = Math.min(state.doc.width, Math.ceil(b.x + b.width) + 3), y1 = Math.min(state.doc.height, Math.ceil(b.y + b.height) + 3);
+    const W = x1 - x0, H = y1 - y0;
+    if (W < 1 || H < 1) return;
+    if (!maskTmp) maskTmp = document.createElement('canvas');
+    maskTmp.width = W;
+    maskTmp.height = H;
+    const t = maskTmp.getContext('2d');
+    t.translate(-x0, -y0);
+    drawLayerRaw(t, l, tier, true);
+    t.globalCompositeOperation = 'destination-in';
+    const rot = l.rotation || 0;
+    const warped = l.type === 'image' && l.warp;
+    const flipped = (l.flipX || l.flipY) && !warped;
+    t.save();
+    if (rot || flipped) {
+      t.translate(l.x + l.width / 2, l.y + l.height / 2);
+      if (rot) t.rotate((rot * Math.PI) / 180);
+      if (flipped) t.scale(l.flipX ? -1 : 1, l.flipY ? -1 : 1);
+      t.translate(-(l.x + l.width / 2), -(l.y + l.height / 2));
+    }
+    t.drawImage(m, l.x, l.y, l.width, l.height);
+    t.restore();
+    g.globalAlpha = plain ? 1 : l.opacity;
+    g.globalCompositeOperation = !plain && l.blend && l.blend !== 'normal' ? l.blend : 'source-over';
+    g.drawImage(maskTmp, 0, 0, W, H, x0, y0, W, H);
+    g.globalAlpha = 1;
+    g.globalCompositeOperation = 'source-over';
+  }
+
+  function drawLayerRaw(g, l, tier, plain) {
     g.globalAlpha = plain ? 1 : l.opacity;
     g.globalCompositeOperation = !plain && l.blend && l.blend !== 'normal' ? l.blend : 'source-over';
     const rot = l.rotation || 0;
@@ -1032,6 +1076,125 @@
   }
 
   // Paints the document (no selection handles). Used for the screen and for export.
+  // ----- Mask tools -----
+
+  let maskEditId = null; // the layer whose mask is being painted on
+
+  const maskEditing = () => {
+    const l = selected();
+    return !!(l && l.mask && maskEditId === l.id);
+  };
+
+  function newMaskCanvas(l, fill) {
+    const sc = Math.min(1, 2048 / Math.max(l.width, l.height));
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(l.width * sc));
+    c.height = Math.max(1, Math.round(l.height * sc));
+    if (fill) {
+      const g = c.getContext('2d');
+      g.fillStyle = '#ffffff';
+      g.fillRect(0, 0, c.width, c.height);
+    }
+    return c;
+  }
+
+  function copyCanvas(src) {
+    const c = document.createElement('canvas');
+    c.width = srcW(src);
+    c.height = srcH(src);
+    c.getContext('2d').drawImage(src, 0, 0);
+    return c;
+  }
+
+  // Gives the layer a new copy of its mask (so Undo can go back to the old one) and returns it.
+  function freshMask(l) {
+    const c = copyCanvas(images.get(l.mask.img));
+    const key = 'img-' + nextImg++;
+    images.set(key, c);
+    l.mask.img = key;
+    return c;
+  }
+
+  function setMask(l, canvas) {
+    const key = 'img-' + nextImg++;
+    images.set(key, canvas);
+    l.mask = { img: key, on: true };
+  }
+
+  function addMask(kind) {
+    const l = selected();
+    if (!l) { toast('Click a layer first.'); return; }
+    if (l.mask) return;
+    let c;
+    if (kind === 'selection') {
+      if (!marq || marq.w < 2 || marq.h < 2) { toast('Pick an area with the Marquee tool first.'); return; }
+      c = newMaskCanvas(l, false);
+      const g = c.getContext('2d');
+      maskTransform(g, l, c);
+      g.fillStyle = '#ffffff';
+      g.fill(regionPath(marq));
+    } else {
+      c = newMaskCanvas(l, kind !== 'hide');
+    }
+    change(() => { setMask(l, c); });
+    maskEditId = l.id;
+    renderSidePanels();
+    toast(kind === 'hide' ? 'Mask added. It hides everything: paint white to show.' : 'Mask added. Paint black to hide, white to show.');
+  }
+
+  function invertMask() {
+    const l = selected();
+    if (!l || !l.mask) return;
+    const old = images.get(l.mask.img);
+    const c = document.createElement('canvas');
+    c.width = srcW(old);
+    c.height = srcH(old);
+    const g = c.getContext('2d');
+    g.fillStyle = '#ffffff';
+    g.fillRect(0, 0, c.width, c.height);
+    g.globalCompositeOperation = 'destination-out';
+    g.drawImage(old, 0, 0);
+    change(() => { setMask(l, c); });
+  }
+
+  function toggleMask() {
+    const l = selected();
+    if (!l || !l.mask) return;
+    change(() => { l.mask.on = l.mask.on === false; });
+  }
+
+  function removeMask() {
+    const l = selected();
+    if (!l || !l.mask) return;
+    if (maskEditId === l.id) maskEditId = null;
+    change(() => { l.mask = null; });
+  }
+
+  // Sets g up so drawing in canvas (document) coordinates lands on the mask picture.
+  function maskTransform(g, l, c) {
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.scale(c.width / l.width, c.height / l.height);
+    g.translate(-l.x, -l.y);
+    const cx = l.x + l.width / 2, cy = l.y + l.height / 2;
+    g.translate(cx, cy);
+    g.scale(l.flipX ? -1 : 1, l.flipY ? -1 : 1);
+    g.rotate(-((l.rotation || 0) * Math.PI) / 180);
+    g.translate(-cx, -cy);
+  }
+
+  // A point on the canvas -> a point on the mask picture.
+  function docToMask(l, c, p) {
+    const q = l.rotation ? toLocal(l, p) : { x: p.x, y: p.y };
+    if (l.flipX) q.x = 2 * l.x + l.width - q.x;
+    if (l.flipY) q.y = 2 * l.y + l.height - q.y;
+    return { x: ((q.x - l.x) * c.width) / l.width, y: ((q.y - l.y) * c.height) / l.height };
+  }
+
+  const lumaOf = (hex) => {
+    const [r, g, b] = hexToRgb(hex);
+    return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+  };
+
   // ---------- Artboards ----------
   // With "Artboards" ticked, the canvas is a big pasteboard holding several pages. A layer belongs
   // to the artboard its centre is on, and is cut off at that artboard's edge.
@@ -1559,7 +1722,28 @@
         tag.title = 'Artboard this layer is on';
         name.append(tag);
       }
-      li.append(eye, makeThumb(l), name, up, down, del);
+      li.append(eye, makeThumb(l));
+      if (l.mask) {
+        const mb = el('button', 'mask-thumb' + (maskEditId === l.id ? ' editing' : '') + (l.mask.on === false ? ' off' : ''));
+        mb.type = 'button';
+        mb.dataset.action = 'mask';
+        mb.title = maskEditId === l.id ? 'Painting on the mask (click to paint on the layer instead)' : 'Click to paint on the mask';
+        const mc = document.createElement('canvas');
+        mc.width = 36;
+        mc.height = 36;
+        const mg = mc.getContext('2d');
+        mg.fillStyle = '#000';
+        mg.fillRect(0, 0, 36, 36);
+        const im = images.get(l.mask.img);
+        if (im) {
+          const sc = Math.min(36 / srcW(im), 36 / srcH(im));
+          const w = srcW(im) * sc, h = srcH(im) * sc;
+          mg.drawImage(im, (36 - w) / 2, (36 - h) / 2, w, h);
+        }
+        mb.append(mc);
+        li.append(mb);
+      }
+      li.append(name, up, down, del);
       layerList.append(li);
     }
   }
@@ -1985,6 +2169,11 @@
   function renderToolOptions() {
     toolOptions.textContent = '';
     const add = (n) => toolOptions.append(n);
+    if (maskEditing() && (tool === 'brush' || tool === 'eraser' || tool === 'gradient')) {
+      add(el('span', 'opt-chip', 'Painting on the mask'));
+      add(el('span', 'opt-hint', tool === 'eraser' ? 'Hides' : 'Black hides, white shows'));
+      add(el('span', 'opt-sep'));
+    }
     const field = (label, control) => {
       const f = el('span', 'opt-field');
       f.append(el('span', 'opt-label', label), control);
@@ -2071,10 +2260,12 @@
         (v) => { gradientOpts.kind = v; renderToolOptions(); }));
       add(seg([{ value: 'no', label: 'Two colors' }, { value: 'yes', label: 'Fade out' }], gradientOpts.fade ? 'yes' : 'no',
         (v) => { gradientOpts.fade = v === 'yes'; renderToolOptions(); }));
-      add(el('span', 'opt-hint', 'Drag across the artwork. It becomes its own layer.'));
+      add(el('span', 'opt-hint', maskEditing() ? 'Drag across the layer to fade the mask.' : 'Drag across the artwork. It becomes its own layer.'));
     } else if (tool === 'eyedropper') {
       add(paintSwatches());
       add(el('span', 'opt-hint', 'Click to pick a color. Alt + click sets the second color.'));
+    } else if (tool === 'cutout') {
+      cutoutOptions(add);
     } else if (tool === 'artboard') {
       if (isMulti()) artboardOptions(add);
       else add(el('span', 'opt-hint', 'Make a new file with “Artboards” ticked to use this.'));
@@ -2170,14 +2361,49 @@
     }
   }
 
+  const maskRow = $('mask-row');
+
+  function renderMaskRow() {
+    maskRow.textContent = '';
+    const l = selected();
+    maskRow.hidden = !l;
+    if (!l) return;
+    maskRow.append(el('span', 'mask-label', 'Mask'));
+    const btn = (label, title, fn, on, disabled) => {
+      const b = el('button', 'btn btn-small' + (on ? ' on' : ''), label);
+      b.type = 'button';
+      b.title = title;
+      b.disabled = !!disabled;
+      b.addEventListener('click', fn);
+      maskRow.append(b);
+    };
+    if (!l.mask) {
+      btn('Add', 'Add a mask that shows everything. Then paint black to hide parts.', () => addMask('reveal'));
+      btn('Hide all', 'Add a mask that hides everything. Then paint white to show parts.', () => addMask('hide'));
+      btn('From selection', 'Show only the area picked with the Marquee tool', () => addMask('selection'), false, !marq);
+      if (l.type === 'image') btn('Remove background', 'Cut out the background automatically', () => setTool('cutout'));
+    } else {
+      btn(maskEditId === l.id ? 'Painting ✓' : 'Paint', 'Brush, Eraser and Gradient paint on the mask: black hides, white shows', () => {
+        maskEditId = maskEditId === l.id ? null : l.id;
+        renderSidePanels();
+        render();
+      }, maskEditId === l.id);
+      btn(l.mask.on === false ? 'Turn on' : 'Turn off', 'Show the whole layer for a moment', toggleMask);
+      btn('Invert', 'Swap what is shown and hidden', invertMask);
+      btn('Remove', 'Delete the mask', removeMask);
+    }
+  }
+
   function renderSidePanels() {
     if (sel.length) abSelected = false;
     const sl = selected();
+    if (maskEditId && (!sl || sl.id !== maskEditId || !sl.mask)) maskEditId = null;
     if (sl) {
       const a = abOf(sl);
       if (a) activeAbId = a.id;
     }
     renderPanel();
+    renderMaskRow();
     renderOpacity();
     renderAdjust();
     renderDesign();
@@ -2284,6 +2510,7 @@
       add(floatButton('Flip ↔', 'Flip left to right', () => flipSelected('x')));
       add(floatButton('Flip ↕', 'Flip top to bottom', () => flipSelected('y')));
       add(floatButton('Bend', 'Skew, perspective, distort', () => setTool('warp')));
+      add(floatButton('Cut out', 'Remove the background', () => setTool('cutout')));
       add(floatButton('Camera Raw', 'Open Camera Raw controls', () => setTab('raw')));
     } else {
       const f = Object.fromEntries(styleFields(l.type, true));
@@ -2297,6 +2524,10 @@
       add(floatButton('Flip ↔', 'Flip left to right', () => flipSelected('x')));
     }
     sep();
+    add(floatButton(l.mask ? 'Mask ✓' : 'Mask', l.mask ? 'This layer has a mask. Click to paint on it.' : 'Add a mask to this layer', () => {
+      if (!l.mask) addMask('reveal');
+      else { maskEditId = maskEditId === l.id ? null : l.id; renderSidePanels(); render(); }
+    }, maskEditId === l.id));
     add(floatButton('Duplicate', 'Make a copy (Ctrl/Cmd + D)', () => duplicateLayers([l.id])));
     add(floatButton('Delete', 'Delete', () => deleteLayers([l.id])));
 
@@ -2519,6 +2750,12 @@
       case 'up': moveLayer(id, +1); break;
       case 'down': moveLayer(id, -1); break;
       case 'delete': deleteLayers([id]); break;
+      case 'mask':
+        sel = [id];
+        maskEditId = maskEditId === id ? null : id;
+        renderSidePanels();
+        render();
+        break;
     }
   });
 
@@ -3060,6 +3297,7 @@
     else if (tool === 'gradient') downGradient(e, p);
     else if (tool === 'eyedropper') downEyedropper(e, p);
     else if (tool === 'warp') downWarp(e, p);
+    else if (tool === 'cutout') pickCutoutColor(p);
     else if (tool === 'artboard') downArtboard(e, p);
   });
 
@@ -3158,6 +3396,7 @@
     } else if (d.mode === 'marq') {
       if (!marq || marq.w < 2 || marq.h < 2) marq = null;
       renderToolOptions();
+      renderMaskRow();
       render();
     } else if (d.mode === 'shape') {
       const l = getLayer(d.id);
@@ -3235,7 +3474,7 @@
     c.height = h;
     const g = c.getContext('2d');
     g.setTransform(sx, 0, 0, sy, -l.x * sx, -l.y * sy);
-    drawLayer(g, l, 'export', true);
+    drawLayerRaw(g, l, 'export', true); // without its mask: the mask stays on the layer
     return { canvas: c, sx, sy };
   }
 
@@ -3245,6 +3484,20 @@
     l.type = 'image';
     l.img = key;
     l.adjust = defaultAdjust();
+    if (l.mask && (l.flipX || l.flipY)) {
+      // the mask was flipped with the picture, so flip its pixels too
+      const old = images.get(l.mask.img);
+      const mc = document.createElement('canvas');
+      mc.width = srcW(old);
+      mc.height = srcH(old);
+      const mg = mc.getContext('2d');
+      mg.translate(l.flipX ? mc.width : 0, l.flipY ? mc.height : 0);
+      mg.scale(l.flipX ? -1 : 1, l.flipY ? -1 : 1);
+      mg.drawImage(old, 0, 0);
+      const mk = 'img-' + nextImg++;
+      images.set(mk, mc);
+      l.mask.img = mk;
+    }
     l.flipX = false; // the flip and any bending are now part of the pixels
     l.flipY = false;
     l.warp = null;
@@ -3522,11 +3775,29 @@
       out.width = sw;
       out.height = sh;
       out.getContext('2d').drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
+      // the mask is cropped to the same part
+      let croppedMask = null;
+      if (l.mask && images.get(l.mask.img)) {
+        const mm = images.get(l.mask.img);
+        const mx1 = (cropBox.x - l.x) / l.width, mx2 = (cropBox.x + cropBox.w - l.x) / l.width;
+        const my1 = (cropBox.y - l.y) / l.height, my2 = (cropBox.y + cropBox.h - l.y) / l.height;
+        const msx = Math.round(mx1 * srcW(mm)), msy = Math.round(my1 * srcH(mm));
+        const msw = Math.max(1, Math.round((mx2 - mx1) * srcW(mm))), msh = Math.max(1, Math.round((my2 - my1) * srcH(mm)));
+        croppedMask = document.createElement('canvas');
+        croppedMask.width = msw;
+        croppedMask.height = msh;
+        croppedMask.getContext('2d').drawImage(mm, msx, msy, msw, msh, 0, 0, msw, msh);
+      }
       change(() => {
         const key = 'img-' + nextImg++;
         images.set(key, out);
         l.img = key; // Camera Raw settings and flips stay as they were
         l.x = b.x; l.y = b.y; l.width = b.w; l.height = b.h;
+        if (croppedMask) {
+          const mk = 'img-' + nextImg++;
+          images.set(mk, croppedMask);
+          l.mask.img = mk;
+        }
       });
     } else {
       if (isMulti()) {
@@ -3742,7 +4013,30 @@
     return c;
   }
 
+  // Painting on a layer's mask: black hides, white shows. (The Eraser always hides.)
+  function downMaskPaint(e, p, mode) {
+    const l = selected();
+    const before = snapshot();
+    const c = freshMask(l);
+    const base = copyCanvas(c);
+    const stroke = document.createElement('canvas');
+    stroke.width = c.width;
+    stroke.height = c.height;
+    const o = brushOpts[mode];
+    const sc = c.width / l.width;
+    const diameter = Math.max(1, o.size * sc);
+    const hide = mode === 'eraser' || lumaOf(paint.fg) < 0.5;
+    startDrag(e, {
+      mode: 'paint', mask: true, erase: hide, id: l.id, canvas: c, base, stroke,
+      sprite: makeDab(diameter, o.hardness, hide ? '#000000' : '#ffffff'),
+      sx: sc, sy: c.height / l.height, opacity: o.opacity / 100, spacing: Math.max(0.5, diameter * 0.12),
+      last: null, carry: 0, before,
+    });
+    paintTo(p);
+  }
+
   function downPaint(e, p, mode) {
+    if (maskEditing()) { downMaskPaint(e, p, mode); return; }
     const before = snapshot();
     const l = paintTarget(mode === 'eraser' ? 'edit' : 'brush');
     if (!l) return;
@@ -3773,8 +4067,13 @@
     const d = drag;
     const l = getLayer(d.id);
     if (!l) return;
-    const x = (p.x - l.x) * d.sx;
-    const y = (p.y - l.y) * d.sy;
+    let x = (p.x - l.x) * d.sx;
+    let y = (p.y - l.y) * d.sy;
+    if (d.mask) {
+      const q = docToMask(l, d.canvas, p);
+      x = q.x;
+      y = q.y;
+    }
     const g = d.stroke.getContext('2d');
     const r = d.sprite.width / 2;
     let x1 = x - r, y1 = y - r, x2 = x + r, y2 = y + r;
@@ -3883,6 +4182,10 @@
   }
 
   function downBucket(e, p) {
+    if (maskEditing()) {
+      toast('You are painting on the mask. Click the mask picture in the Layers list to go back to the layer.');
+      return;
+    }
     change(() => {
       const l = paintTarget('edit');
       if (!l) return;
@@ -3935,6 +4238,25 @@
     gradDraft = null;
     if (!g || Math.hypot(g.x2 - g.x1, g.y2 - g.y1) < 3) {
       render();
+      return;
+    }
+    if (maskEditing()) {
+      const ml = selected();
+      change(() => {
+        const c = freshMask(ml);
+        const a = docToMask(ml, c, { x: g.x1, y: g.y1 });
+        const z = docToMask(ml, c, { x: g.x2, y: g.y2 });
+        const cg = c.getContext('2d');
+        cg.setTransform(1, 0, 0, 1, 0, 0);
+        cg.clearRect(0, 0, c.width, c.height);
+        const grad = gradientOpts.kind === 'radial'
+          ? cg.createRadialGradient(a.x, a.y, 0, a.x, a.y, Math.hypot(z.x - a.x, z.y - a.y))
+          : cg.createLinearGradient(a.x, a.y, z.x, z.y);
+        grad.addColorStop(0, 'rgba(255,255,255,' + lumaOf(paint.fg) + ')');
+        grad.addColorStop(1, 'rgba(255,255,255,' + lumaOf(paint.bg) + ')');
+        cg.fillStyle = grad;
+        cg.fillRect(0, 0, c.width, c.height);
+      });
       return;
     }
     const d = workRect();
@@ -3991,6 +4313,269 @@
       ctx.stroke();
       ctx.restore();
     }
+  }
+
+  // ---------- Remove background ----------
+  // Works on the colours around the edge of the picture (or a colour you click), finds the parts that
+  // look like that background and joins them to the edge, then hides them with a layer mask.
+  // It is not AI: it works best on plain or smooth backgrounds.
+
+  let cutout = null; // { id, before, key, prevMask, work, opts }
+  const cutoutOpts = { tolerance: 25, softness: 6, edgesOnly: true, pick: null };
+
+  const srgb2lin = (v) => { v /= 255; return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+
+  function rgbToLab(r, g, b) {
+    const R = srgb2lin(r), G = srgb2lin(g), B = srgb2lin(b);
+    let x = (0.4124 * R + 0.3576 * G + 0.1805 * B) / 0.95047;
+    let y = 0.2126 * R + 0.7152 * G + 0.0722 * B;
+    let z = (0.0193 * R + 0.1192 * G + 0.9505 * B) / 1.08883;
+    const f = (t) => (t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116);
+    x = f(x); y = f(y); z = f(z);
+    return [116 * y - 16, 500 * (x - y), 200 * (y - z)];
+  }
+
+  // Returns an alpha picture (white, with the cut-out in its alpha) the size of `img`.
+  function computeCutout(img, o) {
+    const W = img.width, H = img.height;
+    const data = img.data;
+    const N = W * H;
+    const lab = new Float32Array(N * 3);
+    for (let i = 0; i < N; i++) {
+      const c = rgbToLab(data[i * 4], data[i * 4 + 1], data[i * 4 + 2]);
+      lab[i * 3] = c[0]; lab[i * 3 + 1] = c[1]; lab[i * 3 + 2] = c[2];
+    }
+    // background colours: what you picked, or the main colours found around the edge
+    let centres = [];
+    if (o.pick) {
+      centres = [rgbToLab(o.pick[0], o.pick[1], o.pick[2])];
+    } else {
+      const ring = [];
+      const t = 2;
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        if (x < t || y < t || x >= W - t || y >= H - t) ring.push(y * W + x);
+      }
+      const K = 3;
+      const step = Math.max(1, Math.floor(ring.length / K));
+      centres = [];
+      for (let k = 0; k < K; k++) {
+        const i = ring[Math.min(ring.length - 1, k * step)];
+        centres.push([lab[i * 3], lab[i * 3 + 1], lab[i * 3 + 2]]);
+      }
+      for (let it = 0; it < 6; it++) {
+        const sum = centres.map(() => [0, 0, 0, 0]);
+        for (const i of ring) {
+          let best = 0, bd = Infinity;
+          for (let k = 0; k < K; k++) {
+            const d = Math.hypot(lab[i * 3] - centres[k][0], lab[i * 3 + 1] - centres[k][1], lab[i * 3 + 2] - centres[k][2]);
+            if (d < bd) { bd = d; best = k; }
+          }
+          sum[best][0] += lab[i * 3]; sum[best][1] += lab[i * 3 + 1]; sum[best][2] += lab[i * 3 + 2]; sum[best][3]++;
+        }
+        centres = centres.map((c, k) => (sum[k][3] ? [sum[k][0] / sum[k][3], sum[k][1] / sum[k][3], sum[k][2] / sum[k][3]] : c));
+        if (it === 5) {
+          // keep only colours that cover a real share of the edge
+          centres = centres.filter((c, k) => sum[k][3] >= ring.length * 0.08);
+          if (!centres.length) centres = [sum.map((q, k) => [q[3], k]).sort((a, b) => b[0] - a[0])[0]].map(([, k]) => centres[k] || [lab[0], lab[1], lab[2]]);
+        }
+      }
+    }
+    // how far each pixel is from the nearest background colour
+    const dist = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      let m = Infinity;
+      for (const c of centres) {
+        const d = Math.hypot(lab[i * 3] - c[0], lab[i * 3 + 1] - c[1], lab[i * 3 + 2] - c[2]);
+        if (d < m) m = d;
+      }
+      dist[i] = m;
+    }
+    const tol = o.tolerance;
+    const bg = new Uint8Array(N);
+    if (o.edgesOnly) {
+      const stack = [];
+      const push = (i) => { if (!bg[i] && dist[i] < tol) { bg[i] = 1; stack.push(i); } };
+      for (let x = 0; x < W; x++) { push(x); push((H - 1) * W + x); }
+      for (let y = 0; y < H; y++) { push(y * W); push(y * W + W - 1); }
+      while (stack.length) {
+        const i = stack.pop();
+        const x = i % W;
+        if (x > 0) push(i - 1);
+        if (x < W - 1) push(i + 1);
+        if (i >= W) push(i - W);
+        if (i < N - W) push(i + W);
+      }
+    } else {
+      for (let i = 0; i < N; i++) if (dist[i] < tol) bg[i] = 1;
+    }
+    // soft edge: pixels just outside the background fade in over a few steps of colour
+    let band = bg;
+    const reach = 3;
+    for (let r = 0; r < reach; r++) {
+      const next = new Uint8Array(band);
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        const i = y * W + x;
+        if (band[i]) continue;
+        if ((x > 0 && band[i - 1]) || (x < W - 1 && band[i + 1]) || (y > 0 && band[i - W]) || (y < H - 1 && band[i + W])) next[i] = 1;
+      }
+      band = next;
+    }
+    const fade = Math.max(1, o.softness * 1.5);
+    let alpha = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      if (bg[i]) alpha[i] = 0;
+      else if (band[i]) alpha[i] = Math.min(1, Math.max(0, (dist[i] - tol) / fade));
+      else alpha[i] = 1;
+    }
+    // a little blur so edges are smooth
+    const rad = Math.round(o.softness / 4);
+    for (let pass = 0; pass < (rad ? 2 : 0); pass++) {
+      const tmp = new Float32Array(N);
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          let sum = 0, n = 0;
+          for (let dy = -rad; dy <= rad; dy++) {
+            const yy = y + dy;
+            if (yy < 0 || yy >= H) continue;
+            for (let dx = -rad; dx <= rad; dx++) {
+              const xx = x + dx;
+              if (xx < 0 || xx >= W) continue;
+              sum += alpha[yy * W + xx]; n++;
+            }
+          }
+          tmp[y * W + x] = sum / n;
+        }
+      }
+      alpha = tmp;
+    }
+    const out = new ImageData(W, H);
+    for (let i = 0; i < N; i++) {
+      out.data[i * 4] = 255; out.data[i * 4 + 1] = 255; out.data[i * 4 + 2] = 255;
+      out.data[i * 4 + 3] = Math.round(alpha[i] * 255);
+    }
+    return out;
+  }
+
+  function runCutout() {
+    if (!cutout) return;
+    const l = getLayer(cutout.id);
+    if (!l) return;
+    const o = cutoutOpts;
+    const result = computeCutout(cutout.work, o);
+    const small = document.createElement('canvas');
+    small.width = result.width;
+    small.height = result.height;
+    small.getContext('2d').putImageData(result, 0, 0);
+    const c = newMaskCanvas(l, false);
+    const g = c.getContext('2d');
+    g.imageSmoothingQuality = 'high';
+    g.drawImage(small, 0, 0, c.width, c.height);
+    if (cutout.prevMask) {
+      // keep what an earlier mask already hid
+      g.globalCompositeOperation = 'destination-in';
+      g.drawImage(cutout.prevMask, 0, 0, c.width, c.height);
+    }
+    if (cutout.key) images.delete(cutout.key);
+    cutout.key = 'img-' + nextImg++;
+    images.set(cutout.key, c);
+    l.mask = { img: cutout.key, on: true };
+    scheduleRender();
+  }
+
+  function startCutout() {
+    cutout = null;
+    const l = selected();
+    if (!l || l.type !== 'image' || !l.visible) {
+      toast('Click a photo first, then use Remove background.');
+      return false;
+    }
+    if (l.warp) {
+      toast('Reset the bend first (Design tab).');
+      return false;
+    }
+    const r = rasterize(l);
+    const sc = Math.min(1, 1000 / Math.max(r.canvas.width, r.canvas.height));
+    const wc = document.createElement('canvas');
+    wc.width = Math.max(1, Math.round(r.canvas.width * sc));
+    wc.height = Math.max(1, Math.round(r.canvas.height * sc));
+    wc.getContext('2d', { willReadFrequently: true }).drawImage(r.canvas, 0, 0, wc.width, wc.height);
+    cutout = {
+      id: l.id, before: snapshot(), key: null, work: wc.getContext('2d').getImageData(0, 0, wc.width, wc.height),
+      prevMask: l.mask && images.get(l.mask.img) ? copyCanvas(images.get(l.mask.img)) : null,
+    };
+    cutoutOpts.pick = null;
+    maskEditId = null;
+    runCutout();
+    return true;
+  }
+
+  function endCutout(keep) {
+    if (!cutout) return;
+    const c = cutout;
+    cutout = null;
+    if (keep) {
+      commit(c.before);
+    } else {
+      if (c.key) images.delete(c.key);
+      state = JSON.parse(c.before);
+      sel = sel.filter((id) => getLayer(id));
+    }
+    renderAll();
+  }
+
+  function pickCutoutColor(p) {
+    if (!cutout) return;
+    const l = getLayer(cutout.id);
+    if (!l) return;
+    const w = cutout.work;
+    const x = clamp(Math.floor(((p.x - l.x) / l.width) * w.width), 0, w.width - 1);
+    const y = clamp(Math.floor(((p.y - l.y) / l.height) * w.height), 0, w.height - 1);
+    const i = (y * w.width + x) * 4;
+    cutoutOpts.pick = [w.data[i], w.data[i + 1], w.data[i + 2]];
+    runCutout();
+    renderToolOptions();
+  }
+
+  function cutoutOptions(add) {
+    if (!cutout) {
+      add(el('span', 'opt-hint', 'Click a photo first.'));
+      return;
+    }
+    const rangeField = (label, key, min, max) => {
+      const w = el('span', 'opt-field');
+      const input = el('input');
+      input.type = 'range';
+      input.min = String(min);
+      input.max = String(max);
+      input.value = String(cutoutOpts[key]);
+      const out = el('span', 'opt-hint', String(cutoutOpts[key]));
+      let timer = 0;
+      input.addEventListener('input', () => {
+        cutoutOpts[key] = Number(input.value);
+        out.textContent = input.value;
+        clearTimeout(timer);
+        timer = setTimeout(runCutout, 60);
+      });
+      w.append(el('span', 'opt-label', label), input, out);
+      add(w);
+    };
+    rangeField('Strength', 'tolerance', 3, 80);
+    rangeField('Soft edge', 'softness', 0, 20);
+    add(seg([{ value: 'edge', label: 'From the edges' }, { value: 'all', label: 'Everywhere' }], cutoutOpts.edgesOnly ? 'edge' : 'all', (v) => {
+      cutoutOpts.edgesOnly = v === 'edge';
+      runCutout();
+      renderToolOptions();
+    }));
+    const sw = el('span', 'opt-field');
+    const dot = el('span', 'cut-dot');
+    if (cutoutOpts.pick) dot.style.background = 'rgb(' + cutoutOpts.pick.join(',') + ')';
+    dot.title = cutoutOpts.pick ? 'Background colour you picked' : 'Background colour is found from the edges';
+    sw.append(dot, el('span', 'opt-hint', cutoutOpts.pick ? 'Picked colour' : 'Click the picture to pick the background colour'));
+    add(sw);
+    if (cutoutOpts.pick) add(actionButton('Auto', 'Go back to finding the colour from the edges', false, () => { cutoutOpts.pick = null; runCutout(); renderToolOptions(); }));
+    add(el('span', 'opt-sep'));
+    add(actionButton('Apply', 'Keep the cut-out (it stays as a mask you can paint on)', false, () => { endCutout(true); setTool('select'); }));
+    add(actionButton('Cancel', 'Go back', false, () => { endCutout(false); setTool('select'); }));
   }
 
   // ---------- Opening images ----------
@@ -4239,6 +4824,16 @@
         const key = 'img-' + nextImg++;
         images.set(key, cv);
         c.img = key;
+      }
+    }
+    if (c.mask) {
+      const mm = images.get(l.mask.img);
+      if (mm) {
+        const key = 'img-' + nextImg++;
+        images.set(key, copyCanvas(mm));
+        c.mask.img = key;
+      } else {
+        c.mask = null;
       }
     }
     return c;
@@ -4726,6 +5321,7 @@
 
   function setTool(name) {
     if (name !== tool) {
+      if (tool === 'cutout' && cutout) endCutout(true);
       finishTextEdit();
       if (penDraft) finishPen(false, false);
       if (name !== 'marquee') marq = null;
@@ -4736,6 +5332,12 @@
     tool = name;
     if (name === 'crop' && !cropBox) initCrop(false);
     if (name === 'warp') prepareWarp();
+    if (name === 'cutout') {
+      if (!startCutout()) {
+        tool = 'select';
+        name = 'select';
+      }
+    }
     workspace.dataset.tool = name;
     canvas.style.cursor = '';
     document.querySelectorAll('.rail-btn[data-tool]').forEach((b) => {
@@ -4743,6 +5345,7 @@
     });
     updatePanClasses();
     renderToolOptions();
+    renderFloatBar();
     render();
   }
 
@@ -4796,7 +5399,7 @@
 
   // ---------- Keyboard ----------
 
-  const TOOL_KEYS = { v: 'select', m: 'marquee', c: 'crop', t: 'text', u: 'shape', p: 'pen', b: 'brush', e: 'eraser', k: 'bucket', g: 'gradient', i: 'eyedropper', d: 'warp', h: 'hand', a: 'artboard' };
+  const TOOL_KEYS = { v: 'select', m: 'marquee', c: 'crop', t: 'text', u: 'shape', p: 'pen', b: 'brush', e: 'eraser', k: 'bucket', g: 'gradient', i: 'eyedropper', d: 'warp', h: 'hand', a: 'artboard', x: 'cutout' };
 
   document.addEventListener('keydown', (e) => {
     if (newDialog.open || fontsDialog.open) return;
