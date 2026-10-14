@@ -2261,6 +2261,8 @@
     } else if (tool === 'eyedropper') {
       add(paintSwatches());
       add(el('span', 'opt-hint', 'Click to pick a color. Alt + click sets the second color.'));
+    } else if (tool === 'cutout') {
+      cutoutOptions(add);
     } else if (tool === 'artboard') {
       if (isMulti()) artboardOptions(add);
       else add(el('span', 'opt-hint', 'Make a new file with “Artboards” ticked to use this.'));
@@ -2376,6 +2378,7 @@
       btn('Add', 'Add a mask that shows everything. Then paint black to hide parts.', () => addMask('reveal'));
       btn('Hide all', 'Add a mask that hides everything. Then paint white to show parts.', () => addMask('hide'));
       btn('From selection', 'Show only the area picked with the Marquee tool', () => addMask('selection'), false, !marq);
+      if (l.type === 'image') btn('Remove background', 'Cut out the background automatically', () => setTool('cutout'));
     } else {
       btn(maskEditId === l.id ? 'Painting ✓' : 'Paint', 'Brush, Eraser and Gradient paint on the mask: black hides, white shows', () => {
         maskEditId = maskEditId === l.id ? null : l.id;
@@ -2503,6 +2506,7 @@
       add(floatButton('Flip ↔', 'Flip left to right', () => flipSelected('x')));
       add(floatButton('Flip ↕', 'Flip top to bottom', () => flipSelected('y')));
       add(floatButton('Bend', 'Skew, perspective, distort', () => setTool('warp')));
+      add(floatButton('Cut out', 'Remove the background', () => setTool('cutout')));
       add(floatButton('Camera Raw', 'Open Camera Raw controls', () => setTab('raw')));
     } else {
       const f = Object.fromEntries(styleFields(l.type, true));
@@ -3281,6 +3285,7 @@
     else if (tool === 'gradient') downGradient(e, p);
     else if (tool === 'eyedropper') downEyedropper(e, p);
     else if (tool === 'warp') downWarp(e, p);
+    else if (tool === 'cutout') pickCutoutColor(p);
     else if (tool === 'artboard') downArtboard(e, p);
   });
 
@@ -4287,6 +4292,269 @@
     }
   }
 
+  // ---------- Remove background ----------
+  // Works on the colours around the edge of the picture (or a colour you click), finds the parts that
+  // look like that background and joins them to the edge, then hides them with a layer mask.
+  // It is not AI: it works best on plain or smooth backgrounds.
+
+  let cutout = null; // { id, before, key, prevMask, work, opts }
+  const cutoutOpts = { tolerance: 25, softness: 6, edgesOnly: true, pick: null };
+
+  const srgb2lin = (v) => { v /= 255; return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+
+  function rgbToLab(r, g, b) {
+    const R = srgb2lin(r), G = srgb2lin(g), B = srgb2lin(b);
+    let x = (0.4124 * R + 0.3576 * G + 0.1805 * B) / 0.95047;
+    let y = 0.2126 * R + 0.7152 * G + 0.0722 * B;
+    let z = (0.0193 * R + 0.1192 * G + 0.9505 * B) / 1.08883;
+    const f = (t) => (t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116);
+    x = f(x); y = f(y); z = f(z);
+    return [116 * y - 16, 500 * (x - y), 200 * (y - z)];
+  }
+
+  // Returns an alpha picture (white, with the cut-out in its alpha) the size of `img`.
+  function computeCutout(img, o) {
+    const W = img.width, H = img.height;
+    const data = img.data;
+    const N = W * H;
+    const lab = new Float32Array(N * 3);
+    for (let i = 0; i < N; i++) {
+      const c = rgbToLab(data[i * 4], data[i * 4 + 1], data[i * 4 + 2]);
+      lab[i * 3] = c[0]; lab[i * 3 + 1] = c[1]; lab[i * 3 + 2] = c[2];
+    }
+    // background colours: what you picked, or the main colours found around the edge
+    let centres = [];
+    if (o.pick) {
+      centres = [rgbToLab(o.pick[0], o.pick[1], o.pick[2])];
+    } else {
+      const ring = [];
+      const t = 2;
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        if (x < t || y < t || x >= W - t || y >= H - t) ring.push(y * W + x);
+      }
+      const K = 3;
+      const step = Math.max(1, Math.floor(ring.length / K));
+      centres = [];
+      for (let k = 0; k < K; k++) {
+        const i = ring[Math.min(ring.length - 1, k * step)];
+        centres.push([lab[i * 3], lab[i * 3 + 1], lab[i * 3 + 2]]);
+      }
+      for (let it = 0; it < 6; it++) {
+        const sum = centres.map(() => [0, 0, 0, 0]);
+        for (const i of ring) {
+          let best = 0, bd = Infinity;
+          for (let k = 0; k < K; k++) {
+            const d = Math.hypot(lab[i * 3] - centres[k][0], lab[i * 3 + 1] - centres[k][1], lab[i * 3 + 2] - centres[k][2]);
+            if (d < bd) { bd = d; best = k; }
+          }
+          sum[best][0] += lab[i * 3]; sum[best][1] += lab[i * 3 + 1]; sum[best][2] += lab[i * 3 + 2]; sum[best][3]++;
+        }
+        centres = centres.map((c, k) => (sum[k][3] ? [sum[k][0] / sum[k][3], sum[k][1] / sum[k][3], sum[k][2] / sum[k][3]] : c));
+        if (it === 5) {
+          // keep only colours that cover a real share of the edge
+          centres = centres.filter((c, k) => sum[k][3] >= ring.length * 0.08);
+          if (!centres.length) centres = [sum.map((q, k) => [q[3], k]).sort((a, b) => b[0] - a[0])[0]].map(([, k]) => centres[k] || [lab[0], lab[1], lab[2]]);
+        }
+      }
+    }
+    // how far each pixel is from the nearest background colour
+    const dist = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      let m = Infinity;
+      for (const c of centres) {
+        const d = Math.hypot(lab[i * 3] - c[0], lab[i * 3 + 1] - c[1], lab[i * 3 + 2] - c[2]);
+        if (d < m) m = d;
+      }
+      dist[i] = m;
+    }
+    const tol = o.tolerance;
+    const bg = new Uint8Array(N);
+    if (o.edgesOnly) {
+      const stack = [];
+      const push = (i) => { if (!bg[i] && dist[i] < tol) { bg[i] = 1; stack.push(i); } };
+      for (let x = 0; x < W; x++) { push(x); push((H - 1) * W + x); }
+      for (let y = 0; y < H; y++) { push(y * W); push(y * W + W - 1); }
+      while (stack.length) {
+        const i = stack.pop();
+        const x = i % W;
+        if (x > 0) push(i - 1);
+        if (x < W - 1) push(i + 1);
+        if (i >= W) push(i - W);
+        if (i < N - W) push(i + W);
+      }
+    } else {
+      for (let i = 0; i < N; i++) if (dist[i] < tol) bg[i] = 1;
+    }
+    // soft edge: pixels just outside the background fade in over a few steps of colour
+    let band = bg;
+    const reach = 3;
+    for (let r = 0; r < reach; r++) {
+      const next = new Uint8Array(band);
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        const i = y * W + x;
+        if (band[i]) continue;
+        if ((x > 0 && band[i - 1]) || (x < W - 1 && band[i + 1]) || (y > 0 && band[i - W]) || (y < H - 1 && band[i + W])) next[i] = 1;
+      }
+      band = next;
+    }
+    const fade = Math.max(1, o.softness * 1.5);
+    let alpha = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      if (bg[i]) alpha[i] = 0;
+      else if (band[i]) alpha[i] = Math.min(1, Math.max(0, (dist[i] - tol) / fade));
+      else alpha[i] = 1;
+    }
+    // a little blur so edges are smooth
+    const rad = Math.round(o.softness / 4);
+    for (let pass = 0; pass < (rad ? 2 : 0); pass++) {
+      const tmp = new Float32Array(N);
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          let sum = 0, n = 0;
+          for (let dy = -rad; dy <= rad; dy++) {
+            const yy = y + dy;
+            if (yy < 0 || yy >= H) continue;
+            for (let dx = -rad; dx <= rad; dx++) {
+              const xx = x + dx;
+              if (xx < 0 || xx >= W) continue;
+              sum += alpha[yy * W + xx]; n++;
+            }
+          }
+          tmp[y * W + x] = sum / n;
+        }
+      }
+      alpha = tmp;
+    }
+    const out = new ImageData(W, H);
+    for (let i = 0; i < N; i++) {
+      out.data[i * 4] = 255; out.data[i * 4 + 1] = 255; out.data[i * 4 + 2] = 255;
+      out.data[i * 4 + 3] = Math.round(alpha[i] * 255);
+    }
+    return out;
+  }
+
+  function runCutout() {
+    if (!cutout) return;
+    const l = getLayer(cutout.id);
+    if (!l) return;
+    const o = cutoutOpts;
+    const result = computeCutout(cutout.work, o);
+    const small = document.createElement('canvas');
+    small.width = result.width;
+    small.height = result.height;
+    small.getContext('2d').putImageData(result, 0, 0);
+    const c = newMaskCanvas(l, false);
+    const g = c.getContext('2d');
+    g.imageSmoothingQuality = 'high';
+    g.drawImage(small, 0, 0, c.width, c.height);
+    if (cutout.prevMask) {
+      // keep what an earlier mask already hid
+      g.globalCompositeOperation = 'destination-in';
+      g.drawImage(cutout.prevMask, 0, 0, c.width, c.height);
+    }
+    if (cutout.key) images.delete(cutout.key);
+    cutout.key = 'img-' + nextImg++;
+    images.set(cutout.key, c);
+    l.mask = { img: cutout.key, on: true };
+    scheduleRender();
+  }
+
+  function startCutout() {
+    cutout = null;
+    const l = selected();
+    if (!l || l.type !== 'image' || !l.visible) {
+      toast('Click a photo first, then use Remove background.');
+      return false;
+    }
+    if (l.warp) {
+      toast('Reset the bend first (Design tab).');
+      return false;
+    }
+    const r = rasterize(l);
+    const sc = Math.min(1, 1000 / Math.max(r.canvas.width, r.canvas.height));
+    const wc = document.createElement('canvas');
+    wc.width = Math.max(1, Math.round(r.canvas.width * sc));
+    wc.height = Math.max(1, Math.round(r.canvas.height * sc));
+    wc.getContext('2d', { willReadFrequently: true }).drawImage(r.canvas, 0, 0, wc.width, wc.height);
+    cutout = {
+      id: l.id, before: snapshot(), key: null, work: wc.getContext('2d').getImageData(0, 0, wc.width, wc.height),
+      prevMask: l.mask && images.get(l.mask.img) ? copyCanvas(images.get(l.mask.img)) : null,
+    };
+    cutoutOpts.pick = null;
+    maskEditId = null;
+    runCutout();
+    return true;
+  }
+
+  function endCutout(keep) {
+    if (!cutout) return;
+    const c = cutout;
+    cutout = null;
+    if (keep) {
+      commit(c.before);
+    } else {
+      if (c.key) images.delete(c.key);
+      state = JSON.parse(c.before);
+      sel = sel.filter((id) => getLayer(id));
+    }
+    renderAll();
+  }
+
+  function pickCutoutColor(p) {
+    if (!cutout) return;
+    const l = getLayer(cutout.id);
+    if (!l) return;
+    const w = cutout.work;
+    const x = clamp(Math.floor(((p.x - l.x) / l.width) * w.width), 0, w.width - 1);
+    const y = clamp(Math.floor(((p.y - l.y) / l.height) * w.height), 0, w.height - 1);
+    const i = (y * w.width + x) * 4;
+    cutoutOpts.pick = [w.data[i], w.data[i + 1], w.data[i + 2]];
+    runCutout();
+    renderToolOptions();
+  }
+
+  function cutoutOptions(add) {
+    if (!cutout) {
+      add(el('span', 'opt-hint', 'Click a photo first.'));
+      return;
+    }
+    const rangeField = (label, key, min, max) => {
+      const w = el('span', 'opt-field');
+      const input = el('input');
+      input.type = 'range';
+      input.min = String(min);
+      input.max = String(max);
+      input.value = String(cutoutOpts[key]);
+      const out = el('span', 'opt-hint', String(cutoutOpts[key]));
+      let timer = 0;
+      input.addEventListener('input', () => {
+        cutoutOpts[key] = Number(input.value);
+        out.textContent = input.value;
+        clearTimeout(timer);
+        timer = setTimeout(runCutout, 60);
+      });
+      w.append(el('span', 'opt-label', label), input, out);
+      add(w);
+    };
+    rangeField('Strength', 'tolerance', 3, 80);
+    rangeField('Soft edge', 'softness', 0, 20);
+    add(seg([{ value: 'edge', label: 'From the edges' }, { value: 'all', label: 'Everywhere' }], cutoutOpts.edgesOnly ? 'edge' : 'all', (v) => {
+      cutoutOpts.edgesOnly = v === 'edge';
+      runCutout();
+      renderToolOptions();
+    }));
+    const sw = el('span', 'opt-field');
+    const dot = el('span', 'cut-dot');
+    if (cutoutOpts.pick) dot.style.background = 'rgb(' + cutoutOpts.pick.join(',') + ')';
+    dot.title = cutoutOpts.pick ? 'Background colour you picked' : 'Background colour is found from the edges';
+    sw.append(dot, el('span', 'opt-hint', cutoutOpts.pick ? 'Picked colour' : 'Click the picture to pick the background colour'));
+    add(sw);
+    if (cutoutOpts.pick) add(actionButton('Auto', 'Go back to finding the colour from the edges', false, () => { cutoutOpts.pick = null; runCutout(); renderToolOptions(); }));
+    add(el('span', 'opt-sep'));
+    add(actionButton('Apply', 'Keep the cut-out (it stays as a mask you can paint on)', false, () => { endCutout(true); setTool('select'); }));
+    add(actionButton('Cancel', 'Go back', false, () => { endCutout(false); setTool('select'); }));
+  }
+
   // ---------- Opening images ----------
 
   function loadImage(file) {
@@ -4912,6 +5180,7 @@
 
   function setTool(name) {
     if (name !== tool) {
+      if (tool === 'cutout' && cutout) endCutout(true);
       finishTextEdit();
       if (penDraft) finishPen(false, false);
       if (name !== 'marquee') marq = null;
@@ -4922,6 +5191,12 @@
     tool = name;
     if (name === 'crop' && !cropBox) initCrop(false);
     if (name === 'warp') prepareWarp();
+    if (name === 'cutout') {
+      if (!startCutout()) {
+        tool = 'select';
+        name = 'select';
+      }
+    }
     workspace.dataset.tool = name;
     canvas.style.cursor = '';
     document.querySelectorAll('.rail-btn[data-tool]').forEach((b) => {
@@ -4983,7 +5258,7 @@
 
   // ---------- Keyboard ----------
 
-  const TOOL_KEYS = { v: 'select', m: 'marquee', c: 'crop', t: 'text', u: 'shape', p: 'pen', b: 'brush', e: 'eraser', k: 'bucket', g: 'gradient', i: 'eyedropper', d: 'warp', h: 'hand', a: 'artboard' };
+  const TOOL_KEYS = { v: 'select', m: 'marquee', c: 'crop', t: 'text', u: 'shape', p: 'pen', b: 'brush', e: 'eraser', k: 'bucket', g: 'gradient', i: 'eyedropper', d: 'warp', h: 'hand', a: 'artboard', x: 'cutout' };
 
   document.addEventListener('keydown', (e) => {
     if (newDialog.open || fontsDialog.open) return;
