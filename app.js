@@ -2138,6 +2138,31 @@
     { value: 'bottom', label: 'Bottom' },
   ];
 
+  // Align buttons drawn as little pictures (a line with two bars), so the bar stays short.
+  const ALIGN_SHAPES = {
+    left: '<path d="M3 3v14"/><rect x="5.5" y="5" width="11" height="4" rx="1" fill="currentColor" stroke="none"/><rect x="5.5" y="11" width="7" height="4" rx="1" fill="currentColor" stroke="none"/>',
+    hcenter: '<path d="M10 3v14"/><rect x="4" y="5" width="12" height="4" rx="1" fill="currentColor" stroke="none"/><rect x="6" y="11" width="8" height="4" rx="1" fill="currentColor" stroke="none"/>',
+    right: '<path d="M17 3v14"/><rect x="3.5" y="5" width="11" height="4" rx="1" fill="currentColor" stroke="none"/><rect x="7.5" y="11" width="7" height="4" rx="1" fill="currentColor" stroke="none"/>',
+    top: '<path d="M3 3h14"/><rect x="5" y="5.5" width="4" height="11" rx="1" fill="currentColor" stroke="none"/><rect x="11" y="5.5" width="4" height="7" rx="1" fill="currentColor" stroke="none"/>',
+    vcenter: '<path d="M3 10h14"/><rect x="5" y="4" width="4" height="12" rx="1" fill="currentColor" stroke="none"/><rect x="11" y="6" width="4" height="8" rx="1" fill="currentColor" stroke="none"/>',
+    bottom: '<path d="M3 17h14"/><rect x="5" y="3.5" width="4" height="11" rx="1" fill="currentColor" stroke="none"/><rect x="11" y="7.5" width="4" height="7" rx="1" fill="currentColor" stroke="none"/>',
+  };
+  const ALIGN_NAMES = { left: 'Line up left', hcenter: 'Line up centre (left to right)', right: 'Line up right', top: 'Line up top', vcenter: 'Line up middle (top to bottom)', bottom: 'Line up bottom' };
+
+  function alignIcons(target) {
+    const wrap = el('div', 'seg');
+    for (const a of ALIGNS) {
+      const b = el('button');
+      b.type = 'button';
+      b.innerHTML = '<svg class="ic" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">' + ALIGN_SHAPES[a.value] + '</svg>'; // our own fixed icon strings only
+      b.title = ALIGN_NAMES[a.value] + ' on ' + target;
+      b.setAttribute('aria-label', b.title);
+      b.addEventListener('click', () => alignSelected(a.value));
+      wrap.append(b);
+    }
+    return wrap;
+  }
+
   function alignSelected(mode) {
     const ls = selectedLayers();
     if (!ls.length) return;
@@ -2186,8 +2211,9 @@
           ? 'Click a layer, or an artboard’s name to pick it. Alt + drag the name to copy it. Use the + buttons to add one.'
           : 'Click a layer, or drag a box to pick several. Hold Shift to add more.'));
       } else {
-        add(el('span', 'opt-label', sel.length > 1 ? 'Line up with each other' : 'Line up on the artwork'));
-        add(seg(ALIGNS, null, alignSelected));
+        const alignTip = sel.length > 1 ? 'each other' : 'the artwork';
+        add(el('span', 'opt-label', 'Align'));
+        add(alignIcons(alignTip));
         add(el('span', 'opt-sep'));
         add(actionButton('Flip ↔', 'Flip left to right', false, () => flipSelected('x')));
         add(actionButton('Flip ↕', 'Flip top to bottom', false, () => flipSelected('y')));
