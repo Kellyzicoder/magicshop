@@ -976,3 +976,14 @@ select[hidden] { display: none; }
 .tw-head { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px 8px 14px; cursor: grab; border-bottom: 1px solid var(--border); user-select: none; }
 .tw-title { font-weight: 600; font-size: 13px; }
 .tab-window .tab-body { overflow: auto; }
+
+/* layer masks */
+.mask-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 14px 4px; }
+.mask-row[hidden] { display: none; }
+.mask-label { color: var(--muted); font-size: 13px; margin-right: 4px; }
+.mask-row .btn.on { background: var(--accent-soft); border-color: var(--accent); }
+.mask-thumb { flex: none; width: 38px; height: 38px; padding: 0; border: 2px solid var(--border); border-radius: 8px; background: #000; cursor: pointer; overflow: hidden; }
+.mask-thumb canvas { width: 100%; height: 100%; display: block; }
+.mask-thumb.editing { border-color: var(--accent); }
+.mask-thumb.off { opacity: .45; }
+.opt-chip { padding: 3px 10px; border-radius: 999px; background: var(--accent-soft); border: 1px solid var(--accent); font-size: 12px; font-weight: 600; }
