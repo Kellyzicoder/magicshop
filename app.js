@@ -1002,6 +1002,50 @@
 
   // `plain` draws the layer with no opacity and no blend mode (used when copying its pixels).
   function drawLayer(g, l, tier, plain) {
+    const m = l.mask && l.mask.on !== false ? images.get(l.mask.img) : null;
+    if (m) drawMasked(g, l, tier, plain, m);
+    else drawLayerRaw(g, l, tier, plain);
+  }
+
+  // ----- Layer masks -----
+  // A mask is a hidden picture on a layer: where it is solid the layer shows, where it is clear the
+  // layer is hidden. It lives in the layer's own space, so it moves, resizes and turns with the layer.
+
+  let maskTmp = null;
+
+  function drawMasked(g, l, tier, plain, m) {
+    const b = layerBounds(l);
+    const x0 = Math.max(0, Math.floor(b.x) - 3), y0 = Math.max(0, Math.floor(b.y) - 3);
+    const x1 = Math.min(state.doc.width, Math.ceil(b.x + b.width) + 3), y1 = Math.min(state.doc.height, Math.ceil(b.y + b.height) + 3);
+    const W = x1 - x0, H = y1 - y0;
+    if (W < 1 || H < 1) return;
+    if (!maskTmp) maskTmp = document.createElement('canvas');
+    maskTmp.width = W;
+    maskTmp.height = H;
+    const t = maskTmp.getContext('2d');
+    t.translate(-x0, -y0);
+    drawLayerRaw(t, l, tier, true);
+    t.globalCompositeOperation = 'destination-in';
+    const rot = l.rotation || 0;
+    const warped = l.type === 'image' && l.warp;
+    const flipped = (l.flipX || l.flipY) && !warped;
+    t.save();
+    if (rot || flipped) {
+      t.translate(l.x + l.width / 2, l.y + l.height / 2);
+      if (rot) t.rotate((rot * Math.PI) / 180);
+      if (flipped) t.scale(l.flipX ? -1 : 1, l.flipY ? -1 : 1);
+      t.translate(-(l.x + l.width / 2), -(l.y + l.height / 2));
+    }
+    t.drawImage(m, l.x, l.y, l.width, l.height);
+    t.restore();
+    g.globalAlpha = plain ? 1 : l.opacity;
+    g.globalCompositeOperation = !plain && l.blend && l.blend !== 'normal' ? l.blend : 'source-over';
+    g.drawImage(maskTmp, 0, 0, W, H, x0, y0, W, H);
+    g.globalAlpha = 1;
+    g.globalCompositeOperation = 'source-over';
+  }
+
+  function drawLayerRaw(g, l, tier, plain) {
     g.globalAlpha = plain ? 1 : l.opacity;
     g.globalCompositeOperation = !plain && l.blend && l.blend !== 'normal' ? l.blend : 'source-over';
     const rot = l.rotation || 0;
@@ -1032,6 +1076,125 @@
   }
 
   // Paints the document (no selection handles). Used for the screen and for export.
+  // ----- Mask tools -----
+
+  let maskEditId = null; // the layer whose mask is being painted on
+
+  const maskEditing = () => {
+    const l = selected();
+    return !!(l && l.mask && maskEditId === l.id);
+  };
+
+  function newMaskCanvas(l, fill) {
+    const sc = Math.min(1, 2048 / Math.max(l.width, l.height));
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(l.width * sc));
+    c.height = Math.max(1, Math.round(l.height * sc));
+    if (fill) {
+      const g = c.getContext('2d');
+      g.fillStyle = '#ffffff';
+      g.fillRect(0, 0, c.width, c.height);
+    }
+    return c;
+  }
+
+  function copyCanvas(src) {
+    const c = document.createElement('canvas');
+    c.width = srcW(src);
+    c.height = srcH(src);
+    c.getContext('2d').drawImage(src, 0, 0);
+    return c;
+  }
+
+  // Gives the layer a new copy of its mask (so Undo can go back to the old one) and returns it.
+  function freshMask(l) {
+    const c = copyCanvas(images.get(l.mask.img));
+    const key = 'img-' + nextImg++;
+    images.set(key, c);
+    l.mask.img = key;
+    return c;
+  }
+
+  function setMask(l, canvas) {
+    const key = 'img-' + nextImg++;
+    images.set(key, canvas);
+    l.mask = { img: key, on: true };
+  }
+
+  function addMask(kind) {
+    const l = selected();
+    if (!l) { toast('Click a layer first.'); return; }
+    if (l.mask) return;
+    let c;
+    if (kind === 'selection') {
+      if (!marq || marq.w < 2 || marq.h < 2) { toast('Pick an area with the Marquee tool first.'); return; }
+      c = newMaskCanvas(l, false);
+      const g = c.getContext('2d');
+      maskTransform(g, l, c);
+      g.fillStyle = '#ffffff';
+      g.fill(regionPath(marq));
+    } else {
+      c = newMaskCanvas(l, kind !== 'hide');
+    }
+    change(() => { setMask(l, c); });
+    maskEditId = l.id;
+    renderSidePanels();
+    toast(kind === 'hide' ? 'Mask added. It hides everything: paint white to show.' : 'Mask added. Paint black to hide, white to show.');
+  }
+
+  function invertMask() {
+    const l = selected();
+    if (!l || !l.mask) return;
+    const old = images.get(l.mask.img);
+    const c = document.createElement('canvas');
+    c.width = srcW(old);
+    c.height = srcH(old);
+    const g = c.getContext('2d');
+    g.fillStyle = '#ffffff';
+    g.fillRect(0, 0, c.width, c.height);
+    g.globalCompositeOperation = 'destination-out';
+    g.drawImage(old, 0, 0);
+    change(() => { setMask(l, c); });
+  }
+
+  function toggleMask() {
+    const l = selected();
+    if (!l || !l.mask) return;
+    change(() => { l.mask.on = l.mask.on === false; });
+  }
+
+  function removeMask() {
+    const l = selected();
+    if (!l || !l.mask) return;
+    if (maskEditId === l.id) maskEditId = null;
+    change(() => { l.mask = null; });
+  }
+
+  // Sets g up so drawing in canvas (document) coordinates lands on the mask picture.
+  function maskTransform(g, l, c) {
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.scale(c.width / l.width, c.height / l.height);
+    g.translate(-l.x, -l.y);
+    const cx = l.x + l.width / 2, cy = l.y + l.height / 2;
+    g.translate(cx, cy);
+    g.scale(l.flipX ? -1 : 1, l.flipY ? -1 : 1);
+    g.rotate(-((l.rotation || 0) * Math.PI) / 180);
+    g.translate(-cx, -cy);
+  }
+
+  // A point on the canvas -> a point on the mask picture.
+  function docToMask(l, c, p) {
+    const q = l.rotation ? toLocal(l, p) : { x: p.x, y: p.y };
+    if (l.flipX) q.x = 2 * l.x + l.width - q.x;
+    if (l.flipY) q.y = 2 * l.y + l.height - q.y;
+    return { x: ((q.x - l.x) * c.width) / l.width, y: ((q.y - l.y) * c.height) / l.height };
+  }
+
+  const lumaOf = (hex) => {
+    const [r, g, b] = hexToRgb(hex);
+    return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+  };
+
   // ---------- Artboards ----------
   // With "Artboards" ticked, the canvas is a big pasteboard holding several pages. A layer belongs
   // to the artboard its centre is on, and is cut off at that artboard's edge.
@@ -1558,7 +1721,28 @@
         tag.title = 'Artboard this layer is on';
         name.append(tag);
       }
-      li.append(eye, makeThumb(l), name, up, down, del);
+      li.append(eye, makeThumb(l));
+      if (l.mask) {
+        const mb = el('button', 'mask-thumb' + (maskEditId === l.id ? ' editing' : '') + (l.mask.on === false ? ' off' : ''));
+        mb.type = 'button';
+        mb.dataset.action = 'mask';
+        mb.title = maskEditId === l.id ? 'Painting on the mask (click to paint on the layer instead)' : 'Click to paint on the mask';
+        const mc = document.createElement('canvas');
+        mc.width = 36;
+        mc.height = 36;
+        const mg = mc.getContext('2d');
+        mg.fillStyle = '#000';
+        mg.fillRect(0, 0, 36, 36);
+        const im = images.get(l.mask.img);
+        if (im) {
+          const sc = Math.min(36 / srcW(im), 36 / srcH(im));
+          const w = srcW(im) * sc, h = srcH(im) * sc;
+          mg.drawImage(im, (36 - w) / 2, (36 - h) / 2, w, h);
+        }
+        mb.append(mc);
+        li.append(mb);
+      }
+      li.append(name, up, down, del);
       layerList.append(li);
     }
   }
@@ -1984,6 +2168,11 @@
   function renderToolOptions() {
     toolOptions.textContent = '';
     const add = (n) => toolOptions.append(n);
+    if (maskEditing() && (tool === 'brush' || tool === 'eraser' || tool === 'gradient')) {
+      add(el('span', 'opt-chip', 'Painting on the mask'));
+      add(el('span', 'opt-hint', tool === 'eraser' ? 'Hides' : 'Black hides, white shows'));
+      add(el('span', 'opt-sep'));
+    }
     const field = (label, control) => {
       const f = el('span', 'opt-field');
       f.append(el('span', 'opt-label', label), control);
@@ -2068,7 +2257,7 @@
         (v) => { gradientOpts.kind = v; renderToolOptions(); }));
       add(seg([{ value: 'no', label: 'Two colors' }, { value: 'yes', label: 'Fade out' }], gradientOpts.fade ? 'yes' : 'no',
         (v) => { gradientOpts.fade = v === 'yes'; renderToolOptions(); }));
-      add(el('span', 'opt-hint', 'Drag across the artwork. It becomes its own layer.'));
+      add(el('span', 'opt-hint', maskEditing() ? 'Drag across the layer to fade the mask.' : 'Drag across the artwork. It becomes its own layer.'));
     } else if (tool === 'eyedropper') {
       add(paintSwatches());
       add(el('span', 'opt-hint', 'Click to pick a color. Alt + click sets the second color.'));
@@ -2167,13 +2356,47 @@
     }
   }
 
+  const maskRow = $('mask-row');
+
+  function renderMaskRow() {
+    maskRow.textContent = '';
+    const l = selected();
+    maskRow.hidden = !l;
+    if (!l) return;
+    maskRow.append(el('span', 'mask-label', 'Mask'));
+    const btn = (label, title, fn, on, disabled) => {
+      const b = el('button', 'btn btn-small' + (on ? ' on' : ''), label);
+      b.type = 'button';
+      b.title = title;
+      b.disabled = !!disabled;
+      b.addEventListener('click', fn);
+      maskRow.append(b);
+    };
+    if (!l.mask) {
+      btn('Add', 'Add a mask that shows everything. Then paint black to hide parts.', () => addMask('reveal'));
+      btn('Hide all', 'Add a mask that hides everything. Then paint white to show parts.', () => addMask('hide'));
+      btn('From selection', 'Show only the area picked with the Marquee tool', () => addMask('selection'), false, !marq);
+    } else {
+      btn(maskEditId === l.id ? 'Painting ✓' : 'Paint', 'Brush, Eraser and Gradient paint on the mask: black hides, white shows', () => {
+        maskEditId = maskEditId === l.id ? null : l.id;
+        renderSidePanels();
+        render();
+      }, maskEditId === l.id);
+      btn(l.mask.on === false ? 'Turn on' : 'Turn off', 'Show the whole layer for a moment', toggleMask);
+      btn('Invert', 'Swap what is shown and hidden', invertMask);
+      btn('Remove', 'Delete the mask', removeMask);
+    }
+  }
+
   function renderSidePanels() {
     const sl = selected();
+    if (maskEditId && (!sl || sl.id !== maskEditId || !sl.mask)) maskEditId = null;
     if (sl) {
       const a = abOf(sl);
       if (a) activeAbId = a.id;
     }
     renderPanel();
+    renderMaskRow();
     renderOpacity();
     renderAdjust();
     renderDesign();
@@ -2293,6 +2516,10 @@
       add(floatButton('Flip ↔', 'Flip left to right', () => flipSelected('x')));
     }
     sep();
+    add(floatButton(l.mask ? 'Mask ✓' : 'Mask', l.mask ? 'This layer has a mask. Click to paint on it.' : 'Add a mask to this layer', () => {
+      if (!l.mask) addMask('reveal');
+      else { maskEditId = maskEditId === l.id ? null : l.id; renderSidePanels(); render(); }
+    }, maskEditId === l.id));
     add(floatButton('Duplicate', 'Make a copy (Ctrl/Cmd + D)', () => duplicateLayers([l.id])));
     add(floatButton('Delete', 'Delete', () => deleteLayers([l.id])));
 
@@ -2515,6 +2742,12 @@
       case 'up': moveLayer(id, +1); break;
       case 'down': moveLayer(id, -1); break;
       case 'delete': deleteLayers([id]); break;
+      case 'mask':
+        sel = [id];
+        maskEditId = maskEditId === id ? null : id;
+        renderSidePanels();
+        render();
+        break;
     }
   });
 
@@ -3146,6 +3379,7 @@
     } else if (d.mode === 'marq') {
       if (!marq || marq.w < 2 || marq.h < 2) marq = null;
       renderToolOptions();
+      renderMaskRow();
       render();
     } else if (d.mode === 'shape') {
       const l = getLayer(d.id);
@@ -3212,7 +3446,7 @@
     c.height = h;
     const g = c.getContext('2d');
     g.setTransform(sx, 0, 0, sy, -l.x * sx, -l.y * sy);
-    drawLayer(g, l, 'export', true);
+    drawLayerRaw(g, l, 'export', true); // without its mask: the mask stays on the layer
     return { canvas: c, sx, sy };
   }
 
@@ -3222,6 +3456,20 @@
     l.type = 'image';
     l.img = key;
     l.adjust = defaultAdjust();
+    if (l.mask && (l.flipX || l.flipY)) {
+      // the mask was flipped with the picture, so flip its pixels too
+      const old = images.get(l.mask.img);
+      const mc = document.createElement('canvas');
+      mc.width = srcW(old);
+      mc.height = srcH(old);
+      const mg = mc.getContext('2d');
+      mg.translate(l.flipX ? mc.width : 0, l.flipY ? mc.height : 0);
+      mg.scale(l.flipX ? -1 : 1, l.flipY ? -1 : 1);
+      mg.drawImage(old, 0, 0);
+      const mk = 'img-' + nextImg++;
+      images.set(mk, mc);
+      l.mask.img = mk;
+    }
     l.flipX = false; // the flip and any bending are now part of the pixels
     l.flipY = false;
     l.warp = null;
@@ -3499,11 +3747,29 @@
       out.width = sw;
       out.height = sh;
       out.getContext('2d').drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
+      // the mask is cropped to the same part
+      let croppedMask = null;
+      if (l.mask && images.get(l.mask.img)) {
+        const mm = images.get(l.mask.img);
+        const mx1 = (cropBox.x - l.x) / l.width, mx2 = (cropBox.x + cropBox.w - l.x) / l.width;
+        const my1 = (cropBox.y - l.y) / l.height, my2 = (cropBox.y + cropBox.h - l.y) / l.height;
+        const msx = Math.round(mx1 * srcW(mm)), msy = Math.round(my1 * srcH(mm));
+        const msw = Math.max(1, Math.round((mx2 - mx1) * srcW(mm))), msh = Math.max(1, Math.round((my2 - my1) * srcH(mm)));
+        croppedMask = document.createElement('canvas');
+        croppedMask.width = msw;
+        croppedMask.height = msh;
+        croppedMask.getContext('2d').drawImage(mm, msx, msy, msw, msh, 0, 0, msw, msh);
+      }
       change(() => {
         const key = 'img-' + nextImg++;
         images.set(key, out);
         l.img = key; // Camera Raw settings and flips stay as they were
         l.x = b.x; l.y = b.y; l.width = b.w; l.height = b.h;
+        if (croppedMask) {
+          const mk = 'img-' + nextImg++;
+          images.set(mk, croppedMask);
+          l.mask.img = mk;
+        }
       });
     } else {
       if (isMulti()) {
@@ -3719,7 +3985,30 @@
     return c;
   }
 
+  // Painting on a layer's mask: black hides, white shows. (The Eraser always hides.)
+  function downMaskPaint(e, p, mode) {
+    const l = selected();
+    const before = snapshot();
+    const c = freshMask(l);
+    const base = copyCanvas(c);
+    const stroke = document.createElement('canvas');
+    stroke.width = c.width;
+    stroke.height = c.height;
+    const o = brushOpts[mode];
+    const sc = c.width / l.width;
+    const diameter = Math.max(1, o.size * sc);
+    const hide = mode === 'eraser' || lumaOf(paint.fg) < 0.5;
+    startDrag(e, {
+      mode: 'paint', mask: true, erase: hide, id: l.id, canvas: c, base, stroke,
+      sprite: makeDab(diameter, o.hardness, hide ? '#000000' : '#ffffff'),
+      sx: sc, sy: c.height / l.height, opacity: o.opacity / 100, spacing: Math.max(0.5, diameter * 0.12),
+      last: null, carry: 0, before,
+    });
+    paintTo(p);
+  }
+
   function downPaint(e, p, mode) {
+    if (maskEditing()) { downMaskPaint(e, p, mode); return; }
     const before = snapshot();
     const l = paintTarget(mode === 'eraser' ? 'edit' : 'brush');
     if (!l) return;
@@ -3750,8 +4039,13 @@
     const d = drag;
     const l = getLayer(d.id);
     if (!l) return;
-    const x = (p.x - l.x) * d.sx;
-    const y = (p.y - l.y) * d.sy;
+    let x = (p.x - l.x) * d.sx;
+    let y = (p.y - l.y) * d.sy;
+    if (d.mask) {
+      const q = docToMask(l, d.canvas, p);
+      x = q.x;
+      y = q.y;
+    }
     const g = d.stroke.getContext('2d');
     const r = d.sprite.width / 2;
     let x1 = x - r, y1 = y - r, x2 = x + r, y2 = y + r;
@@ -3860,6 +4154,10 @@
   }
 
   function downBucket(e, p) {
+    if (maskEditing()) {
+      toast('You are painting on the mask. Click the mask picture in the Layers list to go back to the layer.');
+      return;
+    }
     change(() => {
       const l = paintTarget('edit');
       if (!l) return;
@@ -3912,6 +4210,25 @@
     gradDraft = null;
     if (!g || Math.hypot(g.x2 - g.x1, g.y2 - g.y1) < 3) {
       render();
+      return;
+    }
+    if (maskEditing()) {
+      const ml = selected();
+      change(() => {
+        const c = freshMask(ml);
+        const a = docToMask(ml, c, { x: g.x1, y: g.y1 });
+        const z = docToMask(ml, c, { x: g.x2, y: g.y2 });
+        const cg = c.getContext('2d');
+        cg.setTransform(1, 0, 0, 1, 0, 0);
+        cg.clearRect(0, 0, c.width, c.height);
+        const grad = gradientOpts.kind === 'radial'
+          ? cg.createRadialGradient(a.x, a.y, 0, a.x, a.y, Math.hypot(z.x - a.x, z.y - a.y))
+          : cg.createLinearGradient(a.x, a.y, z.x, z.y);
+        grad.addColorStop(0, 'rgba(255,255,255,' + lumaOf(paint.fg) + ')');
+        grad.addColorStop(1, 'rgba(255,255,255,' + lumaOf(paint.bg) + ')');
+        cg.fillStyle = grad;
+        cg.fillRect(0, 0, c.width, c.height);
+      });
       return;
     }
     const d = workRect();
@@ -4216,6 +4533,16 @@
         const key = 'img-' + nextImg++;
         images.set(key, cv);
         c.img = key;
+      }
+    }
+    if (c.mask) {
+      const mm = images.get(l.mask.img);
+      if (mm) {
+        const key = 'img-' + nextImg++;
+        images.set(key, copyCanvas(mm));
+        c.mask.img = key;
+      } else {
+        c.mask = null;
       }
     }
     return c;
@@ -4602,6 +4929,7 @@
     });
     updatePanClasses();
     renderToolOptions();
+    renderFloatBar();
     render();
   }
 
