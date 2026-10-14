@@ -987,3 +987,5 @@ select[hidden] { display: none; }
 .mask-thumb.editing { border-color: var(--accent); }
 .mask-thumb.off { opacity: .45; }
 .opt-chip { padding: 3px 10px; border-radius: 999px; background: var(--accent-soft); border: 1px solid var(--accent); font-size: 12px; font-weight: 600; }
+
+.cut-dot { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--border); background: repeating-conic-gradient(#888 0 25%, #ccc 0 50%) 50% / 8px 8px; }
