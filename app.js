@@ -2643,21 +2643,30 @@
     drawRulers();
   }
 
+  // Like Photoshop: Layers always sits at the bottom of the side panel, and
+  // Properties / Camera Raw share the top part.
+  let topTab = 'design';
   function setTab(name) {
     activeTab = name;
+    if (name !== 'layers') topTab = name;
+    if (floating.has(topTab)) topTab = ['design', 'raw'].find((n) => !floating.has(n)) || topTab;
     document.querySelectorAll('.tab').forEach((t) => {
-      t.setAttribute('aria-selected', String(t.dataset.tab === name));
+      t.setAttribute('aria-selected', String(t.dataset.tab === 'layers' || t.dataset.tab === topTab));
     });
     document.querySelectorAll('.rail-btn[data-tab]').forEach((b) => {
       b.classList.toggle('active', b.dataset.tab === name);
     });
-    for (const n of ['layers', 'design', 'raw']) $('tab-' + n).hidden = !floating.has(n) && n !== name;
+    for (const n of ['design', 'raw']) $('tab-' + n).hidden = !floating.has(n) && n !== topTab;
+    $('tab-layers').hidden = false;
+    document.querySelector('.panel-top').hidden = floating.has('design') && floating.has('raw');
+    document.querySelector('.panel-layers').hidden = floating.has('layers');
+    if (name === 'layers' && !floating.has('layers')) $('layer-list').scrollIntoView({ block: 'nearest' });
   }
 
   // ----- Detachable tabs: drag a tab out to make it a floating window; "Dock" puts it back -----
 
   const floating = new Map(); // tab name -> window element
-  const TAB_TITLES = { layers: 'Layers', design: 'Design', raw: 'Camera Raw' };
+  const TAB_TITLES = { layers: 'Layers', design: 'Properties', raw: 'Camera Raw' };
   let floatZ = 20;
 
   function detachTab(name, x, y) {
@@ -2703,7 +2712,7 @@
     const win = floating.get(name);
     if (!win) return;
     const body = $('tab-' + name);
-    document.querySelector('.panel').append(body);
+    document.querySelector(name === 'layers' ? '.panel-layers' : '.panel-top').append(body);
     win.remove();
     floating.delete(name);
     document.querySelector('.tab[data-tab="' + name + '"]').hidden = false;
@@ -5744,6 +5753,12 @@
   }
   syncColors();
 
+  // ---------- Layers panel buttons (bottom row, like Photoshop) ----------
+  $('lf-mask').addEventListener('click', () => (selected() ? addMask('show') : toast('Click a layer first.')));
+  $('lf-adjust').addEventListener('click', () => setTab('raw'));
+  $('lf-new').addEventListener('click', () => newEmptyLayer());
+  $('lf-delete').addEventListener('click', () => (sel.length ? deleteLayers(sel.slice()) : toast('Click a layer first.')));
+
   // ---------- Selection commands (Select menu) ----------
   let lastMarq = null;
 
@@ -5937,7 +5952,7 @@
     ]],
     ['Window', [
       ['Layers', 'F7', () => setTab('layers')],
-      ['Properties (Design)', '', () => setTab('design')],
+      ['Properties', '', () => setTab('design')],
       ['Camera Raw', '', () => setTab('raw')],
     ]],
   ];
