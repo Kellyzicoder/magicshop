@@ -188,7 +188,7 @@
   };
 
   // Colors and options for the painting tools.
-  const paint = { fg: '#111111', bg: '#ffffff' };
+  const paint = { fg: '#000000', bg: '#ffffff' };
   const brushOpts = { brush: { size: 40, hardness: 60, opacity: 100 }, eraser: { size: 60, hardness: 90, opacity: 100 } };
   const bucketOpts = { tolerance: 32, contiguous: true, opacity: 100 };
   const gradientOpts = { kind: 'linear', fade: false };
@@ -2321,7 +2321,7 @@
       c.type = 'color';
       c.value = paint[key];
       c.title = key === 'fg' ? 'Color to paint with' : 'Second color (gradient end)';
-      c.addEventListener('input', () => { paint[key] = c.value; });
+      c.addEventListener('input', () => { paint[key] = c.value; syncColors(); });
       swatchInputs[key] = c;
       wrap.append(c);
     }
@@ -2332,6 +2332,7 @@
       [paint.fg, paint.bg] = [paint.bg, paint.fg];
       swatchInputs.fg.value = paint.fg;
       swatchInputs.bg.value = paint.bg;
+      syncColors();
     });
     wrap.append(swap);
     return wrap;
@@ -2642,21 +2643,30 @@
     drawRulers();
   }
 
+  // Like Photoshop: Layers always sits at the bottom of the side panel, and
+  // Properties / Camera Raw share the top part.
+  let topTab = 'design';
   function setTab(name) {
     activeTab = name;
+    if (name !== 'layers') topTab = name;
+    if (floating.has(topTab)) topTab = ['design', 'raw'].find((n) => !floating.has(n)) || topTab;
     document.querySelectorAll('.tab').forEach((t) => {
-      t.setAttribute('aria-selected', String(t.dataset.tab === name));
+      t.setAttribute('aria-selected', String(t.dataset.tab === 'layers' || t.dataset.tab === topTab));
     });
     document.querySelectorAll('.rail-btn[data-tab]').forEach((b) => {
       b.classList.toggle('active', b.dataset.tab === name);
     });
-    for (const n of ['layers', 'design', 'raw']) $('tab-' + n).hidden = !floating.has(n) && n !== name;
+    for (const n of ['design', 'raw']) $('tab-' + n).hidden = !floating.has(n) && n !== topTab;
+    $('tab-layers').hidden = false;
+    document.querySelector('.panel-top').hidden = floating.has('design') && floating.has('raw');
+    document.querySelector('.panel-layers').hidden = floating.has('layers');
+    if (name === 'layers' && !floating.has('layers')) $('layer-list').scrollIntoView({ block: 'nearest' });
   }
 
   // ----- Detachable tabs: drag a tab out to make it a floating window; "Dock" puts it back -----
 
   const floating = new Map(); // tab name -> window element
-  const TAB_TITLES = { layers: 'Layers', design: 'Design', raw: 'Camera Raw' };
+  const TAB_TITLES = { layers: 'Layers', design: 'Properties', raw: 'Camera Raw' };
   let floatZ = 20;
 
   function detachTab(name, x, y) {
@@ -2702,7 +2712,7 @@
     const win = floating.get(name);
     if (!win) return;
     const body = $('tab-' + name);
-    document.querySelector('.panel').append(body);
+    document.querySelector(name === 'layers' ? '.panel-layers' : '.panel-top').append(body);
     win.remove();
     floating.delete(name);
     document.querySelector('.tab[data-tab="' + name + '"]').hidden = false;
@@ -3207,7 +3217,7 @@
     }
     marq = {
       kind: 'path', x: X(x1), y: Y(y1), w: (x2 - x1) / r.sx, h: (y2 - y1) / r.sy,
-      path: fill, outline: edge, pix: { id: l.id, w: W, h: H, x: l.x, y: l.y, data: mask },
+      path: fill, outline: edge, pix: { id: l.id, w: W, h: H, x: l.x, y: l.y, sx: r.sx, sy: r.sy, data: mask },
     };
     renderToolOptions();
     renderMaskRow();
@@ -4275,6 +4285,7 @@
     else paint.fg = hex;
     if (swatchInputs.fg) swatchInputs.fg.value = paint.fg;
     if (swatchInputs.bg) swatchInputs.bg.value = paint.bg;
+    syncColors();
   }
 
   function downEyedropper(e, p) {
@@ -5689,6 +5700,354 @@
   });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeFlyout(); });
 
+  // ---------- Colour swatches (bottom of the tool bar, like Photoshop) ----------
+  // Front square = foreground colour (what you paint with), back square = background.
+  const railColors = el('div', 'rail-colors');
+  const swFg = el('button', 'sw sw-fg');
+  const swBg = el('button', 'sw sw-bg');
+  const swSwap = el('button', 'sw-mini sw-swap');
+  const swReset = el('button', 'sw-mini sw-reset');
+  swFg.type = swBg.type = swSwap.type = swReset.type = 'button';
+  swFg.title = 'Foreground colour (click to change)';
+  swBg.title = 'Background colour (click to change)';
+  swSwap.title = 'Swap colours (X)';
+  swReset.title = 'Black and white (D)';
+  swSwap.innerHTML = '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M3 2h5a2 2 0 0 1 2 2v5"/><path d="M1.5 3.5L3 2l1.5 1.5" /><path d="M8.5 7.5L10 9l1.5-1.5" transform="translate(-1.5 0)"/></svg>';
+  swReset.innerHTML = '<span class="mini-bg"></span><span class="mini-fg"></span>';
+  const pickers = {};
+  for (const [key, btn] of [['fg', swFg], ['bg', swBg]]) {
+    const input = el('input');
+    input.type = 'color';
+    input.className = 'sw-input';
+    input.tabIndex = -1;
+    input.addEventListener('input', () => { paint[key] = input.value; syncColors(); });
+    btn.addEventListener('click', () => { input.value = paint[key]; input.click(); });
+    pickers[key] = input;
+    railColors.append(input);
+  }
+  swSwap.addEventListener('click', swapColors);
+  swReset.addEventListener('click', resetColors);
+  railColors.append(swBg, swFg, swSwap, swReset);
+  {
+    const tabsStart = document.querySelector('.rail-btn[data-tab]');
+    const divider = tabsStart && tabsStart.previousElementSibling;
+    (divider && divider.classList.contains('rail-divider') ? divider : tabsStart).before(railColors);
+  }
+
+  function syncColors() {
+    swFg.style.background = paint.fg;
+    swBg.style.background = paint.bg;
+    if (swatchInputs.fg && swatchInputs.fg.isConnected) swatchInputs.fg.value = paint.fg;
+    if (swatchInputs.bg && swatchInputs.bg.isConnected) swatchInputs.bg.value = paint.bg;
+  }
+
+  function swapColors() {
+    [paint.fg, paint.bg] = [paint.bg, paint.fg];
+    syncColors();
+  }
+
+  function resetColors() {
+    paint.fg = '#000000';
+    paint.bg = '#ffffff';
+    syncColors();
+  }
+  syncColors();
+
+  // ---------- Layers panel buttons (bottom row, like Photoshop) ----------
+  $('lf-mask').addEventListener('click', () => (selected() ? addMask('show') : toast('Click a layer first.')));
+  $('lf-adjust').addEventListener('click', () => setTab('raw'));
+  $('lf-new').addEventListener('click', () => newEmptyLayer());
+  $('lf-delete').addEventListener('click', () => (sel.length ? deleteLayers(sel.slice()) : toast('Click a layer first.')));
+
+  // ---------- Selection commands (Select menu) ----------
+  let lastMarq = null;
+
+  function useSelectTool() {
+    if (tool !== 'marquee' && tool !== 'wand') {
+      const keep = marq;
+      setTool('marquee');
+      marq = keep;
+    }
+  }
+
+  function afterSelectChange() {
+    renderToolOptions();
+    renderMaskRow();
+    render();
+  }
+
+  function selectAll() {
+    useSelectTool();
+    const wr = workRect();
+    marq = { kind: 'rect', x: wr.x, y: wr.y, w: wr.width, h: wr.height };
+    afterSelectChange();
+  }
+
+  function deselect() {
+    if (marq) lastMarq = marq;
+    marq = null;
+    afterSelectChange();
+  }
+
+  function reselect() {
+    if (!lastMarq) return;
+    useSelectTool();
+    marq = lastMarq;
+    afterSelectChange();
+  }
+
+  function invertSelection() {
+    if (!marq) return;
+    useSelectTool();
+    if (marq.inv) { marq = marq.inv; afterSelectChange(); return; }
+    if (marq.pix) {
+      const p = marq.pix;
+      const l = getLayer(p.id);
+      if (l && l.x === p.x && l.y === p.y) {
+        const data = new Uint8Array(p.data.length);
+        for (let i = 0; i < data.length; i++) data[i] = p.data[i] ? 0 : 1;
+        setWandSelection(l, { sx: p.sx, sy: p.sy }, data, p.w, p.h);
+        return;
+      }
+    }
+    // everything on the artwork except the area: the outside goes one way round, the hole the other
+    const wr = workRect();
+    const path = new Path2D();
+    path.rect(wr.x, wr.y, wr.width, wr.height);
+    const m = marq;
+    if (m.kind === 'ellipse') {
+      path.ellipse(m.x + m.w / 2, m.y + m.h / 2, m.w / 2, m.h / 2, 0, 0, Math.PI * 2, true);
+    } else {
+      path.moveTo(m.x, m.y);
+      path.lineTo(m.x, m.y + m.h);
+      path.lineTo(m.x + m.w, m.y + m.h);
+      path.lineTo(m.x + m.w, m.y);
+      path.closePath();
+    }
+    marq = { kind: 'path', x: wr.x, y: wr.y, w: wr.width, h: wr.height, path, outline: path, inv: m };
+    afterSelectChange();
+  }
+
+  // Fill the selected area (or the whole layer) with a colour. With no layer picked,
+  // it colours the background, like filling the Background layer in Photoshop.
+  function fillWith(color) {
+    const l = selected();
+    if (!l) {
+      if (sel.length > 1) { toast('Pick just one layer to fill.'); return; }
+      change(() => {
+        const a = activeAb() || state.doc;
+        a.background = color;
+        a.transparent = false;
+      });
+      return;
+    }
+    if (!l.visible) { toast('Show the layer first.'); return; }
+    if (l.rotation || l.warp) { toast('Set the rotation back to 0 and reset any bend first.'); return; }
+    const raster = rasterize(l);
+    const g = raster.canvas.getContext('2d');
+    g.setTransform(raster.sx, 0, 0, raster.sy, -l.x * raster.sx, -l.y * raster.sy);
+    g.fillStyle = color;
+    if (marq) g.fill(regionPath(marq));
+    else g.fillRect(l.x, l.y, l.width, l.height);
+    change(() => putPixels(l, raster.canvas));
+  }
+
+  function newEmptyLayer() {
+    finishTextEdit();
+    change(() => {
+      const l = newPaintLayer();
+      l.name = 'Layer ' + state.layers.length;
+    });
+  }
+
+  function layerToEnd(top) {
+    const l = selected();
+    if (!l) return;
+    change(() => {
+      const i = state.layers.indexOf(l);
+      state.layers.splice(i, 1);
+      if (top) state.layers.push(l);
+      else state.layers.unshift(l);
+    });
+  }
+
+  function exportAs(format) {
+    $('export-format').value = format;
+    $('export-format').dispatchEvent(new Event('change'));
+    exportImage();
+  }
+
+  // ---------- Menu bar ----------
+  // Photoshop's menus, with the same shortcuts. Every item runs something the
+  // app already does, so the menus and the buttons always agree.
+  const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+  const hasLayer = () => !!selected();
+  const hasLayers = () => sel.length > 0;
+  const hasMask = () => !!(selected() && selected().mask);
+
+  const MENUS = [
+    ['File', [
+      ['New…', 'Ctrl+N', () => $('btn-new').click()],
+      ['Open / Upload image…', 'Ctrl+O', () => fileInput.click()],
+      ['Place image…', 'Ctrl+Shift+P', () => fileInput.click()],
+      '-',
+      ['Export as PNG', 'Ctrl+Alt+Shift+W', () => exportAs('png')],
+      ['Export as JPG', '', () => exportAs('jpeg')],
+    ]],
+    ['Edit', [
+      ['Undo', 'Ctrl+Z', () => undo(), () => undoStack.length > 0],
+      ['Redo', 'Ctrl+Shift+Z', () => redo(), () => redoStack.length > 0],
+      '-',
+      ['Fill with foreground', 'Alt+Backspace', () => fillWith(paint.fg)],
+      ['Fill with background', 'Ctrl+Backspace', () => fillWith(paint.bg)],
+      ['Clear', 'Delete', () => (marq && selected() ? marqueeOp('erase') : deleteLayers(sel.slice())), hasLayers],
+      '-',
+      ['Free Transform', 'Ctrl+T', () => { setTool('select'); if (!sel.length) toast('Click a layer to transform it.'); }],
+      ['Skew / Perspective / Distort', '', () => setTool('warp')],
+      ['Flip Horizontal', '', () => flipSelected('x'), hasLayers],
+      ['Flip Vertical', '', () => flipSelected('y'), hasLayers],
+    ]],
+    ['Image', [
+      ['Adjustments (Camera Raw)…', '', () => setTab('raw')],
+      '-',
+      ['Crop', '', () => setTool('crop')],
+      ['Remove Background', '', () => setTool('cutout'), hasLayer],
+    ]],
+    ['Layer', [
+      ['New Layer', 'Ctrl+Shift+N', newEmptyLayer],
+      ['Duplicate Layer', 'Ctrl+J', () => {
+        if (marq && selected()) marqueeOp('copy');
+        else if (sel.length) duplicateLayers(sel.slice());
+        else if (isMulti() && abSelected) addArtboard(activeAb(), true, 'right');
+      }, () => hasLayers() || (isMulti() && abSelected)],
+      ['Layer via Cut', 'Ctrl+Shift+J', () => marqueeOp('cut'), () => !!(marq && selected())],
+      ['Delete Layer', '', () => deleteLayers(sel.slice()), hasLayers],
+      '-',
+      ['Mask: Reveal All', '', () => addMask('show'), () => hasLayer() && !hasMask()],
+      ['Mask: Hide All', '', () => addMask('hide'), () => hasLayer() && !hasMask()],
+      ['Mask: Reveal Selection', '', () => addMask('selection'), () => hasLayer() && !hasMask() && !!marq],
+      ['Mask: Invert', '', invertMask, hasMask],
+      ['Mask: Turn On / Off', '', toggleMask, hasMask],
+      ['Mask: Delete', '', removeMask, hasMask],
+      '-',
+      ['Bring to Front', 'Ctrl+Shift+]', () => layerToEnd(true), hasLayer],
+      ['Bring Forward', 'Ctrl+]', () => moveLayer(sel[0], 1), hasLayer],
+      ['Send Backward', 'Ctrl+[', () => moveLayer(sel[0], -1), hasLayer],
+      ['Send to Back', 'Ctrl+Shift+[', () => layerToEnd(false), hasLayer],
+    ]],
+    ['Select', [
+      ['All', 'Ctrl+A', selectAll],
+      ['Deselect', 'Ctrl+D', deselect, () => !!marq],
+      ['Reselect', 'Ctrl+Shift+D', reselect, () => !!lastMarq],
+      ['Inverse', 'Ctrl+Shift+I', invertSelection, () => !!marq],
+    ]],
+    ['Filter', [
+      ['Camera Raw Filter…', 'Ctrl+Shift+A', () => setTab('raw')],
+    ]],
+    ['View', [
+      ['Zoom In', 'Ctrl+=', () => zoomBy(1.25)],
+      ['Zoom Out', 'Ctrl+-', () => zoomBy(0.8)],
+      ['Fit on Screen', 'Ctrl+0', () => { fitToScreen(); render(); drawRulers(); }],
+      ['100%', 'Ctrl+1', () => { const r = workspace.getBoundingClientRect(); setZoom(1, r.left + r.width / 2, r.top + r.height / 2); }],
+    ]],
+    ['Window', [
+      ['Layers', 'F7', () => setTab('layers')],
+      ['Properties', '', () => setTab('design')],
+      ['Camera Raw', '', () => setTab('raw')],
+    ]],
+  ];
+
+  // "Ctrl+Shift+]" -> what to show on screen (⌘⇧] on a Mac)
+  function keyLabel(k) {
+    if (!k) return '';
+    if (!IS_MAC) return k;
+    return k.replace('Ctrl+', '⌘').replace('Alt+', '⌥').replace('Shift+', '⇧').replace('Backspace', '⌫');
+  }
+
+  // The key that was pressed, written the same way as in MENUS.
+  function pressedKey(e) {
+    const c = e.code;
+    let k = c.startsWith('Key') ? c.slice(3) : c.startsWith('Digit') ? c.slice(5)
+      : ({ BracketLeft: '[', BracketRight: ']', Equal: '=', Minus: '-', NumpadAdd: '=', NumpadSubtract: '-' })[c] || e.key;
+    if (k.length === 1) k = k.toUpperCase();
+    return (e.ctrlKey || e.metaKey ? 'Ctrl+' : '') + (e.altKey ? 'Alt+' : '') + (e.shiftKey ? 'Shift+' : '') + k;
+  }
+
+  const shortcutMap = new Map();
+  for (const [, items] of MENUS) {
+    for (const it of items) {
+      if (it === '-' || !it[1] || it[1] === 'Delete') continue; // Delete is already handled by the main key handler
+      // store with modifiers in one fixed order: Ctrl, Alt, Shift
+      const parts = it[1].split('+');
+      const key = parts.pop() || '+';
+      const norm = (parts.includes('Ctrl') ? 'Ctrl+' : '') + (parts.includes('Alt') ? 'Alt+' : '') + (parts.includes('Shift') ? 'Shift+' : '') + (key.length === 1 ? key.toUpperCase() : key);
+      shortcutMap.set(norm, it);
+    }
+  }
+
+  const menubar = el('nav', 'menubar');
+  menubar.setAttribute('aria-label', 'Menus');
+  const menuPop = el('div', 'menu-pop');
+  menuPop.hidden = true;
+  document.body.append(menuPop);
+  let openMenu = null;
+
+  function closeMenu() {
+    if (!openMenu) return;
+    openMenu.btn.classList.remove('open');
+    menuPop.hidden = true;
+    openMenu = null;
+  }
+
+  function showMenu(btn, items) {
+    closeMenu();
+    menuPop.replaceChildren();
+    for (const it of items) {
+      if (it === '-') { menuPop.append(el('div', 'menu-sep')); continue; }
+      const [label, keys, run, ok] = it;
+      const b = el('button', 'menu-item');
+      b.type = 'button';
+      b.disabled = ok ? !ok() : false;
+      b.append(el('span', 'menu-label', label), el('span', 'menu-key', keyLabel(keys)));
+      b.addEventListener('click', () => { closeMenu(); run(); });
+      menuPop.append(b);
+    }
+    const r = btn.getBoundingClientRect();
+    menuPop.hidden = false;
+    menuPop.style.left = Math.min(r.left, innerWidth - menuPop.offsetWidth - 8) + 'px';
+    menuPop.style.top = r.bottom + 4 + 'px';
+    btn.classList.add('open');
+    openMenu = { btn, items };
+  }
+
+  for (const [name, items] of MENUS) {
+    const b = el('button', 'menu-btn', name);
+    b.type = 'button';
+    b.addEventListener('click', () => (openMenu && openMenu.btn === b ? closeMenu() : showMenu(b, items)));
+    b.addEventListener('mouseenter', () => { if (openMenu && openMenu.btn !== b) showMenu(b, items); });
+    menubar.append(b);
+  }
+  document.querySelector('.topbar .brand').after(menubar);
+
+  document.addEventListener('pointerdown', (e) => {
+    if (openMenu && !menuPop.contains(e.target) && !menubar.contains(e.target)) closeMenu();
+  });
+
+  // Runs before the other key handlers, so Photoshop's shortcuts win.
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && openMenu) { closeMenu(); e.stopPropagation(); return; }
+    if (newDialog.open || fontsDialog.open) return;
+    const t = e.target;
+    if ((t instanceof HTMLInputElement && t.type !== 'range') || t instanceof HTMLSelectElement || t instanceof HTMLTextAreaElement || (t && t.isContentEditable)) return;
+    const it = shortcutMap.get(pressedKey(e));
+    if (!it) return;
+    e.preventDefault();
+    e.stopPropagation();
+    closeMenu();
+    if (it[3] && !it[3]()) return;
+    it[2]();
+  }, true);
+
   // Capture phase: runs before the canvas gets the click, so panning never moves a layer.
   workspace.addEventListener('pointerdown', (e) => {
     const wantsPan = e.button === 1 || (e.button === 0 && panReady());
@@ -5735,7 +6094,7 @@
 
   // ---------- Keyboard ----------
 
-  const TOOL_KEYS = { v: 'select', m: 'marquee', c: 'crop', t: 'text', u: 'shape', p: 'pen', b: 'brush', e: 'eraser', k: 'bucket', g: 'gradient', i: 'eyedropper', d: 'warp', h: 'hand', a: 'artboard', x: 'cutout', w: 'wand' };
+  const TOOL_KEYS = { v: 'select', m: 'marquee', c: 'crop', t: 'text', u: 'shape', p: 'pen', b: 'brush', e: 'eraser', k: 'bucket', g: 'gradient', i: 'eyedropper', h: 'hand', a: 'artboard', w: 'wand' };
 
   document.addEventListener('keydown', (e) => {
     if (newDialog.open || fontsDialog.open) return;
@@ -5763,10 +6122,6 @@
     } else if (mod && key === 'y') {
       e.preventDefault();
       redo();
-    } else if (mod && key === 'd') {
-      e.preventDefault();
-      if (isMulti() && !sel.length && abSelected) addArtboard(activeAb(), true, 'right');
-      else if (sel.length) duplicateLayers(sel.slice());
     } else if (mod) {
       return;
     } else if (tool === 'crop' && cropBox && e.key === 'Enter') {
@@ -5793,7 +6148,7 @@
     } else if (e.key === 'Delete' || e.key === 'Backspace') {
       e.preventDefault();
       if (isMulti() && !sel.length && (tool === 'artboard' || (tool === 'select' && abSelected))) deleteArtboard(activeAb());
-      else if ((tool === 'marquee' || tool === 'wand') && marq) marqueeOp('erase');
+      else if (marq && selected()) marqueeOp('erase');
       else if (sel.length) deleteLayers(sel.slice());
     } else if (e.key.startsWith('Arrow') && sel.length && !(t instanceof HTMLInputElement)) {
       e.preventDefault();
@@ -5814,6 +6169,10 @@
       fitToScreen();
       render();
       drawRulers();
+    } else if (key === 'd' && !e.shiftKey && !e.altKey) {
+      resetColors();
+    } else if (key === 'x' && !e.shiftKey && !e.altKey) {
+      swapColors();
     } else if (TOOL_KEYS[key]) {
       if (TOOL_KEYS[key] === 'artboard' && !isMulti()) {
         toast('Make a new file with “Artboards” ticked to use artboards.');
