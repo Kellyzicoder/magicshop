@@ -188,7 +188,7 @@
   };
 
   // Colors and options for the painting tools.
-  const paint = { fg: '#111111', bg: '#ffffff' };
+  const paint = { fg: '#000000', bg: '#ffffff' };
   const brushOpts = { brush: { size: 40, hardness: 60, opacity: 100 }, eraser: { size: 60, hardness: 90, opacity: 100 } };
   const bucketOpts = { tolerance: 32, contiguous: true, opacity: 100 };
   const gradientOpts = { kind: 'linear', fade: false };
@@ -2321,7 +2321,7 @@
       c.type = 'color';
       c.value = paint[key];
       c.title = key === 'fg' ? 'Color to paint with' : 'Second color (gradient end)';
-      c.addEventListener('input', () => { paint[key] = c.value; });
+      c.addEventListener('input', () => { paint[key] = c.value; syncColors(); });
       swatchInputs[key] = c;
       wrap.append(c);
     }
@@ -2332,6 +2332,7 @@
       [paint.fg, paint.bg] = [paint.bg, paint.fg];
       swatchInputs.fg.value = paint.fg;
       swatchInputs.bg.value = paint.bg;
+      syncColors();
     });
     wrap.append(swap);
     return wrap;
@@ -4275,6 +4276,7 @@
     else paint.fg = hex;
     if (swatchInputs.fg) swatchInputs.fg.value = paint.fg;
     if (swatchInputs.bg) swatchInputs.bg.value = paint.bg;
+    syncColors();
   }
 
   function downEyedropper(e, p) {
@@ -5689,6 +5691,59 @@
   });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeFlyout(); });
 
+  // ---------- Colour swatches (bottom of the tool bar, like Photoshop) ----------
+  // Front square = foreground colour (what you paint with), back square = background.
+  const railColors = el('div', 'rail-colors');
+  const swFg = el('button', 'sw sw-fg');
+  const swBg = el('button', 'sw sw-bg');
+  const swSwap = el('button', 'sw-mini sw-swap');
+  const swReset = el('button', 'sw-mini sw-reset');
+  swFg.type = swBg.type = swSwap.type = swReset.type = 'button';
+  swFg.title = 'Foreground colour (click to change)';
+  swBg.title = 'Background colour (click to change)';
+  swSwap.title = 'Swap colours (X)';
+  swReset.title = 'Black and white (D)';
+  swSwap.innerHTML = '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M3 2h5a2 2 0 0 1 2 2v5"/><path d="M1.5 3.5L3 2l1.5 1.5" /><path d="M8.5 7.5L10 9l1.5-1.5" transform="translate(-1.5 0)"/></svg>';
+  swReset.innerHTML = '<span class="mini-bg"></span><span class="mini-fg"></span>';
+  const pickers = {};
+  for (const [key, btn] of [['fg', swFg], ['bg', swBg]]) {
+    const input = el('input');
+    input.type = 'color';
+    input.className = 'sw-input';
+    input.tabIndex = -1;
+    input.addEventListener('input', () => { paint[key] = input.value; syncColors(); });
+    btn.addEventListener('click', () => { input.value = paint[key]; input.click(); });
+    pickers[key] = input;
+    railColors.append(input);
+  }
+  swSwap.addEventListener('click', swapColors);
+  swReset.addEventListener('click', resetColors);
+  railColors.append(swBg, swFg, swSwap, swReset);
+  {
+    const tabsStart = document.querySelector('.rail-btn[data-tab]');
+    const divider = tabsStart && tabsStart.previousElementSibling;
+    (divider && divider.classList.contains('rail-divider') ? divider : tabsStart).before(railColors);
+  }
+
+  function syncColors() {
+    swFg.style.background = paint.fg;
+    swBg.style.background = paint.bg;
+    if (swatchInputs.fg && swatchInputs.fg.isConnected) swatchInputs.fg.value = paint.fg;
+    if (swatchInputs.bg && swatchInputs.bg.isConnected) swatchInputs.bg.value = paint.bg;
+  }
+
+  function swapColors() {
+    [paint.fg, paint.bg] = [paint.bg, paint.fg];
+    syncColors();
+  }
+
+  function resetColors() {
+    paint.fg = '#000000';
+    paint.bg = '#ffffff';
+    syncColors();
+  }
+  syncColors();
+
   // ---------- Selection commands (Select menu) ----------
   let lastMarq = null;
 
@@ -6024,7 +6079,7 @@
 
   // ---------- Keyboard ----------
 
-  const TOOL_KEYS = { v: 'select', m: 'marquee', c: 'crop', t: 'text', u: 'shape', p: 'pen', b: 'brush', e: 'eraser', k: 'bucket', g: 'gradient', i: 'eyedropper', d: 'warp', h: 'hand', a: 'artboard', x: 'cutout', w: 'wand' };
+  const TOOL_KEYS = { v: 'select', m: 'marquee', c: 'crop', t: 'text', u: 'shape', p: 'pen', b: 'brush', e: 'eraser', k: 'bucket', g: 'gradient', i: 'eyedropper', h: 'hand', a: 'artboard', w: 'wand' };
 
   document.addEventListener('keydown', (e) => {
     if (newDialog.open || fontsDialog.open) return;
@@ -6099,6 +6154,10 @@
       fitToScreen();
       render();
       drawRulers();
+    } else if (key === 'd' && !e.shiftKey && !e.altKey) {
+      resetColors();
+    } else if (key === 'x' && !e.shiftKey && !e.altKey) {
+      swapColors();
     } else if (TOOL_KEYS[key]) {
       if (TOOL_KEYS[key] === 'artboard' && !isMulti()) {
         toast('Make a new file with “Artboards” ticked to use artboards.');

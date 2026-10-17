@@ -1057,3 +1057,25 @@ select[hidden] { display: none; }
 }
 .topbar #btn-new .btn-text, .topbar #btn-open .btn-text { display: none; }
 .topbar .dim-label { display: none; }
+
+/* ---------- Colour swatches in the tool bar ---------- */
+.rail-colors { position: relative; flex: none; width: 42px; height: 46px; margin: 4px 0; }
+.rail-colors .sw {
+  position: absolute; width: 22px; height: 22px; padding: 0;
+  border: 1.5px solid #fff; border-radius: 3px; cursor: pointer;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6);
+}
+.rail-colors .sw-fg { left: 4px; top: 4px; z-index: 2; }
+.rail-colors .sw-bg { left: 16px; top: 16px; z-index: 1; }
+.rail-colors .sw-mini {
+  position: absolute; width: 12px; height: 12px; padding: 0; border: 0;
+  background: transparent; color: var(--muted); cursor: pointer;
+}
+.rail-colors .sw-mini:hover { color: var(--text); }
+.rail-colors .sw-swap { right: 0; top: 2px; }
+.rail-colors .sw-swap svg { width: 12px; height: 12px; display: block; }
+.rail-colors .sw-reset { left: 2px; bottom: 0; }
+.sw-reset .mini-bg, .sw-reset .mini-fg { position: absolute; width: 6px; height: 6px; border: 1px solid var(--muted); }
+.sw-reset .mini-fg { left: 0; top: 0; background: #000; z-index: 1; }
+.sw-reset .mini-bg { left: 3px; top: 3px; background: #fff; }
+.rail-colors .sw-input { position: absolute; left: 0; top: 0; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
