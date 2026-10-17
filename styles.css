@@ -1079,3 +1079,32 @@ select[hidden] { display: none; }
 .sw-reset .mini-fg { left: 0; top: 0; background: #000; z-index: 1; }
 .sw-reset .mini-bg { left: 3px; top: 3px; background: #fff; }
 .rail-colors .sw-input { position: absolute; left: 0; top: 0; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+
+/* ---------- Side panel split: Properties / Camera Raw on top, Layers below ---------- */
+.panel-top, .panel-layers { display: flex; flex-direction: column; min-height: 0; }
+.panel-top { flex: 1 1 52%; }
+.panel-layers { flex: 1 1 48%; border-top: 1px solid var(--border); }
+.panel-top[hidden], .panel-layers[hidden] { display: none; }
+.panel-top[hidden] + .panel-layers { border-top: 0; }
+.panel .tabs { grid-template-columns: repeat(auto-fit, minmax(0, 1fr)); margin: 10px 12px 6px; }
+.panel .tabs-single { display: flex; background: transparent; padding: 0; margin: 8px 12px 2px; }
+.tabs-single .tab { flex: none; padding: 6px 10px; }
+.tabs-single .tab[aria-selected="true"] { box-shadow: none; }
+.layer-head { display: flex; flex-direction: column; gap: 4px; padding: 4px 14px 2px; }
+.lh-row { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 10px; }
+.lh-row label { font-size: 13px; color: var(--muted); }
+.lh-row select { grid-column: 2 / -1; padding-top: 5px; padding-bottom: 5px; }
+.lh-opacity .slider { grid-column: 2; grid-row: 1; }
+.lh-opacity output { grid-column: 3; }
+.layer-foot {
+  display: flex; align-items: center; gap: 2px;
+  padding: 6px 10px; border-top: 1px solid var(--border);
+}
+.lf-btn {
+  display: grid; place-items: center; width: 30px; height: 30px; padding: 0;
+  border: 0; border-radius: 8px; background: transparent; color: var(--muted); cursor: pointer; font-weight: 700;
+}
+.lf-btn .ic { width: 17px; height: 17px; }
+.lf-btn:hover { background: var(--surface-2); color: var(--text); }
+.lf-spacer { flex: 1; }
+.lf-help { cursor: help; }

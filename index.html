@@ -124,7 +124,7 @@
       <button type="button" class="rail-btn" data-tab="layers" title="Layers" aria-label="Layers">
         <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
       </button>
-      <button type="button" class="rail-btn" data-tab="design" title="Design" aria-label="Design">
+      <button type="button" class="rail-btn" data-tab="design" title="Properties" aria-label="Properties">
         <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="13.5" cy="6.5" r=".5"/><circle cx="17.5" cy="10.5" r=".5"/><circle cx="8.5" cy="7.5" r=".5"/><circle cx="6.5" cy="12.5" r=".5"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/></svg>
       </button>
       <button type="button" class="rail-btn" data-tab="raw" title="Camera Raw" aria-label="Camera Raw">
@@ -175,42 +175,17 @@
 
     <!-- ===== Right panel ===== -->
     <aside class="panel">
-      <div class="tabs" role="tablist">
-        <button type="button" class="tab" role="tab" data-tab="layers">Layers</button>
-        <button type="button" class="tab" role="tab" data-tab="design">Design</button>
-        <button type="button" class="tab" role="tab" data-tab="raw">Camera Raw</button>
-      </div>
-
-      <!-- Layers tab -->
-      <section id="tab-layers" class="tab-body">
-        <div class="opacity-row">
-          <label for="opacity">Opacity</label>
-          <output id="opacity-out" for="opacity" class="chip chip-small">100</output>
-          <input id="opacity" class="slider" type="range" min="0" max="100" value="100" disabled>
-        </div>
-        <div class="opacity-row blend-row">
-          <label for="blend">Blend</label>
-          <select id="blend" disabled aria-label="Blend mode"></select>
+      <div class="panel-top">
+        <div class="tabs" role="tablist">
+          <button type="button" class="tab" role="tab" data-tab="design">Properties</button>
+          <button type="button" class="tab" role="tab" data-tab="raw">Camera Raw</button>
         </div>
 
-        <div id="mask-row" class="mask-row" hidden></div>
-
-        <ul id="layer-list" class="layer-list"></ul>
-
-        <p class="tips">
-          Drag to move a layer. Drag a corner to resize it (Shift switches between free and locked shape).
-          Scroll to move up and down. Hold Ctrl and scroll to zoom, or press ] and [.
-          Hold Space and drag to move around.
-        </p>
-      </section>
-
-      <!-- Design tab -->
       <section id="tab-design" class="tab-body" hidden>
         <div id="design-empty" class="raw-empty"></div>
         <div id="design-body" class="raw-body" hidden></div>
       </section>
 
-      <!-- Camera Raw tab -->
       <section id="tab-raw" class="tab-body" hidden>
         <div class="raw-head">
           <div class="crumb">
@@ -236,6 +211,42 @@
           </div>
         </div>
       </section>
+      </div>
+
+      <div class="panel-layers">
+        <div class="tabs tabs-single" role="tablist">
+          <button type="button" class="tab" role="tab" data-tab="layers">Layers</button>
+        </div>
+
+      <section id="tab-layers" class="tab-body">
+
+        <div class="layer-head">
+        <div class="lh-row">
+          <label for="blend">Blend</label>
+          <select id="blend" disabled aria-label="Blend mode"></select>
+        </div>
+        <div class="lh-row lh-opacity">
+          <label for="opacity">Opacity</label>
+          <output id="opacity-out" for="opacity" class="chip chip-small">100</output>
+          <input id="opacity" class="slider" type="range" min="0" max="100" value="100" disabled>
+        </div>
+        </div>
+
+        <div id="mask-row" class="mask-row" hidden></div>
+
+        <ul id="layer-list" class="layer-list"></ul>
+
+
+        <div class="layer-foot">
+          <button type="button" id="lf-mask" class="lf-btn" title="Add layer mask" aria-label="Add layer mask"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="12" cy="12" r="3.5"/></svg></button>
+          <button type="button" id="lf-adjust" class="lf-btn" title="Adjust (Camera Raw)" aria-label="Adjust"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 4v16" /><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor"/></svg></button>
+          <button type="button" id="lf-new" class="lf-btn" title="New layer (Ctrl+Shift+N)" aria-label="New layer"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M12 8v8M8 12h8"/></svg></button>
+          <button type="button" id="lf-delete" class="lf-btn" title="Delete layer" aria-label="Delete layer"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="M6 7l1 13h10l1-13"/><path d="M9 7V4h6v3"/></svg></button>
+          <span class="lf-spacer"></span>
+          <button type="button" class="lf-btn lf-help" title="Drag to move a layer. Drag a corner to resize it (Shift switches between free and locked shape). Scroll to move up and down. Hold Ctrl and scroll to zoom, or press ] and [. Hold Space and drag to move around." aria-label="Tips">?</button>
+        </div>
+      </section>
+      </div>
     </aside>
   </div>
 
