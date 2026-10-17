@@ -1241,7 +1241,7 @@
     d.height = clamp(Math.max(...list.map((a) => a.y + a.height)) + AB_MARGIN, 1, MAX_DOC);
   }
 
-  const PASTEBOARD = '#3a3f4d';
+  const PASTEBOARD = '#262626';
 
   function paintArtboardBg(g, a, forceOpaque) {
     if (a.transparent && !forceOpaque) {
