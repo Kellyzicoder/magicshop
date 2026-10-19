@@ -188,7 +188,7 @@
   };
 
   // Colors and options for the painting tools.
-  const paint = { fg: '#111111', bg: '#ffffff' };
+  const paint = { fg: '#000000', bg: '#ffffff' };
   const brushOpts = { brush: { size: 40, hardness: 60, opacity: 100 }, eraser: { size: 60, hardness: 90, opacity: 100 } };
   const bucketOpts = { tolerance: 32, contiguous: true, opacity: 100 };
   const gradientOpts = { kind: 'linear', fade: false };
@@ -1199,7 +1199,7 @@
   // With "Artboards" ticked, the canvas is a big pasteboard holding several pages. A layer belongs
   // to the artboard its centre is on, and is cut off at that artboard's edge.
 
-  const AB_MARGIN = 140;
+  const AB_MARGIN = 200;
   const AB_GAP = 80;
   let activeAbId = null;
   let abSelected = false;   // the artboard itself (not a layer on it) is selected
@@ -1241,7 +1241,7 @@
     d.height = clamp(Math.max(...list.map((a) => a.y + a.height)) + AB_MARGIN, 1, MAX_DOC);
   }
 
-  const PASTEBOARD = '#3a3f4d';
+  const PASTEBOARD = '#262626';
 
   function paintArtboardBg(g, a, forceOpaque) {
     if (a.transparent && !forceOpaque) {
@@ -1388,6 +1388,7 @@
 
   function regionPath(m) {
     const p = new Path2D();
+    if (m.kind === 'path') return m.path;
     if (m.kind === 'ellipse') p.ellipse(m.x + m.w / 2, m.y + m.h / 2, m.w / 2, m.h / 2, 0, 0, Math.PI * 2);
     else p.rect(m.x, m.y, m.w, m.h);
     return p;
@@ -1410,7 +1411,7 @@
 
     if (marq && marq.w > 0 && marq.h > 0) {
       // "Marching ants": a dashed line, white over black so it shows on any picture.
-      const path = regionPath(marq);
+      const path = marq.outline || regionPath(marq);
       ctx.save();
       ctx.lineWidth = s;
       ctx.setLineDash([5 * s, 5 * s]);
@@ -1524,6 +1525,7 @@
     fitMode = true;
     applyScale();
     centerView();
+    if (isMulti()) workspace.scrollTop -= 40; // keep the artboard names clear of the tool bar
   }
 
   // Zoom, keeping the spot under (clientX, clientY) where it is on screen.
@@ -2218,10 +2220,12 @@
         add(actionButton('Flip ↔', 'Flip left to right', false, () => flipSelected('x')));
         add(actionButton('Flip ↕', 'Flip top to bottom', false, () => flipSelected('y')));
       }
+    } else if (tool === 'wand') {
+      wandOptions(add);
     } else if (tool === 'marquee') {
       add(seg([{ value: 'rect', label: 'Rectangle' }, { value: 'ellipse', label: 'Ellipse' }], marqKind, (v) => {
         marqKind = v;
-        if (marq) marq.kind = v;
+        if (marq && marq.kind !== 'path') marq.kind = v;
         renderToolOptions();
         render();
       }));
@@ -2317,7 +2321,7 @@
       c.type = 'color';
       c.value = paint[key];
       c.title = key === 'fg' ? 'Color to paint with' : 'Second color (gradient end)';
-      c.addEventListener('input', () => { paint[key] = c.value; });
+      c.addEventListener('input', () => { paint[key] = c.value; syncColors(); });
       swatchInputs[key] = c;
       wrap.append(c);
     }
@@ -2328,6 +2332,7 @@
       [paint.fg, paint.bg] = [paint.bg, paint.fg];
       swatchInputs.fg.value = paint.fg;
       swatchInputs.bg.value = paint.bg;
+      syncColors();
     });
     wrap.append(swap);
     return wrap;
@@ -2638,21 +2643,30 @@
     drawRulers();
   }
 
+  // Like Photoshop: Layers always sits at the bottom of the side panel, and
+  // Properties / Camera Raw share the top part.
+  let topTab = 'design';
   function setTab(name) {
     activeTab = name;
+    if (name !== 'layers') topTab = name;
+    if (floating.has(topTab)) topTab = ['design', 'raw'].find((n) => !floating.has(n)) || topTab;
     document.querySelectorAll('.tab').forEach((t) => {
-      t.setAttribute('aria-selected', String(t.dataset.tab === name));
+      t.setAttribute('aria-selected', String(t.dataset.tab === 'layers' || t.dataset.tab === topTab));
     });
     document.querySelectorAll('.rail-btn[data-tab]').forEach((b) => {
       b.classList.toggle('active', b.dataset.tab === name);
     });
-    for (const n of ['layers', 'design', 'raw']) $('tab-' + n).hidden = !floating.has(n) && n !== name;
+    for (const n of ['design', 'raw']) $('tab-' + n).hidden = !floating.has(n) && n !== topTab;
+    $('tab-layers').hidden = false;
+    document.querySelector('.panel-top').hidden = floating.has('design') && floating.has('raw');
+    document.querySelector('.panel-layers').hidden = floating.has('layers');
+    if (name === 'layers' && !floating.has('layers')) $('layer-list').scrollIntoView({ block: 'nearest' });
   }
 
   // ----- Detachable tabs: drag a tab out to make it a floating window; "Dock" puts it back -----
 
   const floating = new Map(); // tab name -> window element
-  const TAB_TITLES = { layers: 'Layers', design: 'Design', raw: 'Camera Raw' };
+  const TAB_TITLES = { layers: 'Layers', design: 'Properties', raw: 'Camera Raw' };
   let floatZ = 20;
 
   function detachTab(name, x, y) {
@@ -2698,7 +2712,7 @@
     const win = floating.get(name);
     if (!win) return;
     const body = $('tab-' + name);
-    document.querySelector('.panel').append(body);
+    document.querySelector(name === 'layers' ? '.panel-layers' : '.panel-top').append(body);
     win.remove();
     floating.delete(name);
     document.querySelector('.tab[data-tab="' + name + '"]').hidden = false;
@@ -3128,6 +3142,117 @@
     }
   }
 
+  // ---------- Magic wand ----------
+  // Click a colour and everything like it (and touching it) is selected.
+  const wandOpts = { tolerance: 30, touching: true };
+
+  function wandSelect(l, p, add) {
+    const r = rasterize(l);
+    const W = r.canvas.width, H = r.canvas.height;
+    const px = Math.floor((p.x - l.x) * r.sx), py = Math.floor((p.y - l.y) * r.sy);
+    if (px < 0 || py < 0 || px >= W || py >= H) { toast('Click on the selected layer.'); return; }
+    const d = r.canvas.getContext('2d').getImageData(0, 0, W, H).data;
+    const N = W * H;
+    const si = (py * W + px) * 4;
+    const sr = d[si], sg = d[si + 1], sb = d[si + 2], sa = d[si + 3];
+    const lim = wandOpts.tolerance * 2.55;
+    const like = (i) => {
+      const k = i * 4;
+      return Math.max(Math.abs(d[k] - sr), Math.abs(d[k + 1] - sg), Math.abs(d[k + 2] - sb), Math.abs(d[k + 3] - sa)) <= lim;
+    };
+    let mask = new Uint8Array(N);
+    if (wandOpts.touching) {
+      const stack = [py * W + px];
+      mask[stack[0]] = 1;
+      while (stack.length) {
+        const i = stack.pop();
+        const x = i % W;
+        let j;
+        if (x > 0 && !mask[j = i - 1] && like(j)) { mask[j] = 1; stack.push(j); }
+        if (x < W - 1 && !mask[j = i + 1] && like(j)) { mask[j] = 1; stack.push(j); }
+        if (i >= W && !mask[j = i - W] && like(j)) { mask[j] = 1; stack.push(j); }
+        if (i < N - W && !mask[j = i + W] && like(j)) { mask[j] = 1; stack.push(j); }
+      }
+    } else {
+      for (let i = 0; i < N; i++) if (like(i)) mask[i] = 1;
+    }
+    const old = marq && marq.pix;
+    if (add && old && old.id === l.id && old.w === W && old.h === H && old.x === l.x && old.y === l.y) {
+      for (let i = 0; i < N; i++) if (old.data[i]) mask[i] = 1;
+    }
+    setWandSelection(l, r, mask, W, H);
+  }
+
+  function setWandSelection(l, r, mask, W, H) {
+    let x1 = W, y1 = H, x2 = -1, y2 = -1;
+    const fill = new Path2D(), edge = new Path2D();
+    const X = (x) => l.x + x / r.sx, Y = (y) => l.y + y / r.sy;
+    for (let y = 0; y < H; y++) {
+      let x = 0;
+      while (x < W) {
+        if (!mask[y * W + x]) { x++; continue; }
+        const a = x;
+        while (x < W && mask[y * W + x]) x++;
+        fill.rect(X(a), Y(y), (x - a) / r.sx, 1 / r.sy);
+        if (a < x1) x1 = a; if (x > x2) x2 = x; if (y < y1) y1 = y; if (y + 1 > y2) y2 = y + 1;
+      }
+    }
+    // outline: only the edges between picked and not picked pixels, joined into long lines
+    const at = (x, y) => (x >= 0 && y >= 0 && x < W && y < H && mask[y * W + x] ? 1 : 0);
+    for (let y = 0; y <= H; y++) {
+      let a = -1, b = -1;
+      for (let x = 0; x <= W; x++) {
+        const e = at(x, y) !== at(x, y - 1);
+        if (e && a < 0) a = x;
+        if ((!e || x === W) && a >= 0) { edge.moveTo(X(a), Y(y)); edge.lineTo(X(e ? x + 1 : x), Y(y)); a = -1; }
+      }
+    }
+    for (let x = 0; x <= W; x++) {
+      let a = -1;
+      for (let y = 0; y <= H; y++) {
+        const e = at(x, y) !== at(x - 1, y);
+        if (e && a < 0) a = y;
+        if ((!e || y === H) && a >= 0) { edge.moveTo(X(x), Y(a)); edge.lineTo(X(x), Y(e ? y + 1 : y)); a = -1; }
+      }
+    }
+    marq = {
+      kind: 'path', x: X(x1), y: Y(y1), w: (x2 - x1) / r.sx, h: (y2 - y1) / r.sy,
+      path: fill, outline: edge, pix: { id: l.id, w: W, h: H, x: l.x, y: l.y, sx: r.sx, sy: r.sy, data: mask },
+    };
+    renderToolOptions();
+    renderMaskRow();
+    render();
+  }
+
+  function downWand(e, p) {
+    const l = selected();
+    if (!l || !l.visible) { toast('Click a layer first, then click a colour on it.'); return; }
+    if (l.rotation || l.warp) { toast('Set the rotation back to 0 and reset any bend first.'); return; }
+    wandSelect(l, p, e.shiftKey);
+  }
+
+  function wandOptions(add) {
+    const w = el('span', 'opt-field');
+    const input = el('input');
+    input.type = 'range'; input.min = '0'; input.max = '100';
+    input.value = String(wandOpts.tolerance);
+    const out = el('span', 'opt-hint', String(wandOpts.tolerance));
+    input.addEventListener('input', () => { wandOpts.tolerance = Number(input.value); out.textContent = input.value; });
+    w.append(el('span', 'opt-label', 'Strength'), input, out);
+    add(w);
+    add(seg([{ value: 'near', label: 'Touching' }, { value: 'all', label: 'Everywhere' }], wandOpts.touching ? 'near' : 'all', (v) => {
+      wandOpts.touching = v === 'near';
+      renderToolOptions();
+    }));
+    add(el('span', 'opt-sep'));
+    const has = !!marq;
+    add(actionButton('Copy to new layer', 'Copy the area to a new layer', !has, () => marqueeOp('copy')));
+    add(actionButton('Cut to new layer', 'Move the area to a new layer', !has, () => marqueeOp('cut')));
+    add(actionButton('Erase', 'Delete the pixels in the area (Delete key)', !has, () => marqueeOp('erase')));
+    add(actionButton('Deselect', 'Remove the area (Esc)', !has, () => { marq = null; renderToolOptions(); renderMaskRow(); render(); }));
+    if (!has) add(el('span', 'opt-hint', 'Click a colour on the layer. Hold Shift to add more.'));
+  }
+
   function downMarquee(e, p) {
     marq = { kind: marqKind, x: p.x, y: p.y, w: 0, h: 0 };
     startDrag(e, { mode: 'marq', start: p });
@@ -3314,6 +3439,7 @@
       downSelect(e, p);
     }
     else if (tool === 'marquee') downMarquee(e, p);
+    else if (tool === 'wand') downWand(e, p);
     else if (tool === 'text') downText(e, p);
     else if (tool === 'shape') downShape(e, p);
     else if (tool === 'pen') downPen(e, p);
@@ -4159,6 +4285,7 @@
     else paint.fg = hex;
     if (swatchInputs.fg) swatchInputs.fg.value = paint.fg;
     if (swatchInputs.bg) swatchInputs.bg.value = paint.bg;
+    syncColors();
   }
 
   function downEyedropper(e, p) {
@@ -4708,15 +4835,85 @@
 
   // ---------- Create artwork ----------
 
-  const PRESETS = [
-    { name: 'Instagram post', w: 1080, h: 1080 },
-    { name: 'Instagram story', w: 1080, h: 1920 },
-    { name: 'Poster A4 (300 dpi)', w: 2480, h: 3508 },
-    { name: 'Poster A3 (300 dpi)', w: 3508, h: 4961 },
-    { name: 'YouTube thumbnail', w: 1280, h: 720 },
-    { name: 'Wallpaper (Full HD)', w: 1920, h: 1080 },
-    { name: 'LinkedIn banner', w: 1584, h: 396 },
+  // Sizes in pixels. Print sizes are at 300 dpi. (The biggest side we allow is 8000 px.)
+  const PRESET_GROUPS = [
+    { name: 'Popular', items: [
+      { name: 'Instagram post', w: 1080, h: 1080 },
+      { name: 'Instagram story', w: 1080, h: 1920 },
+      { name: 'Poster A4 (300 dpi)', w: 2480, h: 3508 },
+      { name: 'Poster A3 (300 dpi)', w: 3508, h: 4961 },
+      { name: 'YouTube thumbnail', w: 1280, h: 720 },
+      { name: 'Wallpaper (Full HD)', w: 1920, h: 1080 },
+      { name: 'LinkedIn banner', w: 1584, h: 396 },
+    ] },
+    { name: 'Print', items: [
+      { name: 'A6', w: 1240, h: 1748 },
+      { name: 'A5', w: 1748, h: 2480 },
+      { name: 'A4', w: 2480, h: 3508 },
+      { name: 'A3', w: 3508, h: 4961 },
+      { name: 'A2', w: 4961, h: 7016 },
+      { name: 'US Letter', w: 2550, h: 3300 },
+      { name: 'US Legal', w: 2550, h: 4200 },
+      { name: 'Tabloid 11 × 17 in', w: 3300, h: 5100 },
+      { name: 'Poster 18 × 24 in', w: 5400, h: 7200 },
+      { name: 'Postcard 4 × 6 in', w: 1200, h: 1800 },
+      { name: 'Flyer DL', w: 1181, h: 2362 },
+      { name: 'Business card', w: 1050, h: 600 },
+    ] },
+    { name: 'Photo', items: [
+      { name: '4 × 6 in', w: 1800, h: 1200 },
+      { name: '5 × 7 in', w: 2100, h: 1500 },
+      { name: '8 × 10 in', w: 3000, h: 2400 },
+      { name: 'Square', w: 3000, h: 3000 },
+      { name: '3:2 camera', w: 6000, h: 4000 },
+      { name: '4:3 camera', w: 4000, h: 3000 },
+      { name: '16:9', w: 3840, h: 2160 },
+    ] },
+    { name: 'Social', items: [
+      { name: 'Instagram post', w: 1080, h: 1080 },
+      { name: 'Instagram portrait', w: 1080, h: 1350 },
+      { name: 'Instagram / TikTok story', w: 1080, h: 1920 },
+      { name: 'Facebook post', w: 1200, h: 630 },
+      { name: 'Facebook cover', w: 820, h: 312 },
+      { name: 'X (Twitter) post', w: 1600, h: 900 },
+      { name: 'X (Twitter) header', w: 1500, h: 500 },
+      { name: 'LinkedIn banner', w: 1584, h: 396 },
+      { name: 'YouTube thumbnail', w: 1280, h: 720 },
+      { name: 'YouTube channel art', w: 2560, h: 1440 },
+      { name: 'Pinterest pin', w: 1000, h: 1500 },
+    ] },
+    { name: 'Web', items: [
+      { name: 'Web large', w: 1920, h: 1080 },
+      { name: 'Web medium', w: 1366, h: 768 },
+      { name: 'Web small', w: 1024, h: 768 },
+      { name: 'Laptop', w: 1440, h: 900 },
+      { name: 'Desktop 2K', w: 2560, h: 1440 },
+      { name: 'Email header', w: 600, h: 200 },
+      { name: 'App icon', w: 1024, h: 1024 },
+      { name: 'Favicon', w: 512, h: 512 },
+    ] },
+    { name: 'Mobile', items: [
+      { name: 'iPhone 16 Pro', w: 1206, h: 2622 },
+      { name: 'iPhone 16 Pro Max', w: 1320, h: 2868 },
+      { name: 'iPhone 15', w: 1179, h: 2556 },
+      { name: 'iPhone SE', w: 750, h: 1334 },
+      { name: 'Android (FHD+)', w: 1080, h: 2400 },
+      { name: 'Galaxy S', w: 1440, h: 3120 },
+      { name: 'iPad Pro 11 in', w: 1668, h: 2420 },
+      { name: 'iPad Pro 13 in', w: 2064, h: 2752 },
+      { name: 'iPad', w: 1536, h: 2048 },
+    ] },
+    { name: 'Video', items: [
+      { name: 'HD 720p', w: 1280, h: 720 },
+      { name: 'Full HD 1080p', w: 1920, h: 1080 },
+      { name: 'Vertical HD', w: 1080, h: 1920 },
+      { name: '2K', w: 2048, h: 1080 },
+      { name: '4K UHD', w: 3840, h: 2160 },
+      { name: 'Cinema 4K', w: 4096, h: 2160 },
+      { name: 'Ultrawide', w: 2560, h: 1080 },
+    ] },
   ];
+  let presetGroup = 0;
 
   const presetGrid = $('preset-grid');
   const newName = $('new-name');
@@ -4731,21 +4928,37 @@
     });
   }
 
-  for (const p of PRESETS) {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'preset';
-    b.dataset.w = String(p.w);
-    b.dataset.h = String(p.h);
-    const name = document.createElement('span');
-    name.className = 'preset-name';
-    name.textContent = p.name;
-    const size = document.createElement('span');
-    size.className = 'preset-size';
-    size.textContent = p.w + ' × ' + p.h;
-    b.append(name, size);
-    presetGrid.append(b);
+  const presetTabs = $('preset-tabs');
+
+  function renderPresets() {
+    presetTabs.textContent = '';
+    PRESET_GROUPS.forEach((g, i) => {
+      const t = document.createElement('button');
+      t.type = 'button';
+      t.textContent = g.name;
+      t.className = i === presetGroup ? 'on' : '';
+      t.addEventListener('click', () => { presetGroup = i; renderPresets(); });
+      presetTabs.append(t);
+    });
+    presetGrid.textContent = '';
+    for (const p of PRESET_GROUPS[presetGroup].items) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'preset';
+      b.dataset.w = String(p.w);
+      b.dataset.h = String(p.h);
+      const name = document.createElement('span');
+      name.className = 'preset-name';
+      name.textContent = p.name;
+      const size = document.createElement('span');
+      size.className = 'preset-size';
+      size.textContent = p.w + ' × ' + p.h;
+      b.append(name, size);
+      presetGrid.append(b);
+    }
+    markPreset();
   }
+  renderPresets();
 
   presetGrid.addEventListener('click', (e) => {
     const b = e.target.closest('.preset');
@@ -4806,6 +5019,7 @@
 
   const nextAbId = () => 'ab-' + (Math.max(0, ...abList().map((a) => Number(a.id.slice(3)) || 0)) + 1);
   const AB_MIN = 16;
+  const AB_TOP = 40; // room above an artboard for its name tab
   const AB_HANDLES = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
 
   function abHandlePos(a, name) {
@@ -4978,7 +5192,7 @@
     let found = null;
     for (let i = list.length - 1; i >= 0 && !found; i--) {
       const a = list[i];
-      const w = Math.min(a.width, ctx.measureText(abLabelText(a)).width + 8 * s);
+      const w = ctx.measureText(abLabelText(a)).width + 8 * s;
       if (p.x >= a.x && p.x <= a.x + w && p.y >= a.y - 28 * s && p.y <= a.y) found = a;
     }
     ctx.restore();
@@ -4988,9 +5202,10 @@
   // The little "+" buttons beside the active artboard.
   function abPlusPos(a) {
     const s = 1 / viewScale;
+    const off = Math.max(10 * s, Math.min(26 * s, AB_MARGIN - 14 * s)); // stay on the canvas when zoomed out
     return {
-      right: { x: a.x + a.width + 26 * s, y: a.y + a.height / 2 },
-      below: { x: a.x + a.width / 2, y: a.y + a.height + 26 * s },
+      right: { x: a.x + a.width + off, y: a.y + a.height / 2 },
+      below: { x: a.x + a.width / 2, y: a.y + a.height + off },
     };
   }
 
@@ -5057,7 +5272,7 @@
       }
       const a = d.made;
       a.x = Math.round(Math.max(0, Math.min(d.start.x, p.x)));
-      a.y = Math.round(Math.max(0, Math.min(d.start.y, p.y)));
+      a.y = Math.round(Math.max(AB_TOP, Math.min(d.start.y, p.y)));
       a.width = Math.max(AB_MIN, Math.round(Math.abs(p.x - d.start.x)));
       a.height = Math.max(AB_MIN, Math.round(Math.abs(p.y - d.start.y)));
       growCanvasLive();
@@ -5065,7 +5280,7 @@
       const a = getAb(d.id);
       if (!a) return;
       const nx = Math.max(0, Math.round(d.orig.x + p.x - d.start.x));
-      const ny = Math.max(0, Math.round(d.orig.y + p.y - d.start.y));
+      const ny = Math.max(AB_TOP, Math.round(d.orig.y + p.y - d.start.y));
       const dx = nx - d.orig.x, dy = ny - d.orig.y;
       a.x = nx;
       a.y = ny;
@@ -5080,7 +5295,7 @@
       let x1 = d.orig.x, y1 = d.orig.y, x2 = d.orig.x + d.orig.w, y2 = d.orig.y + d.orig.h;
       if (d.handle.includes('w')) x1 = Math.min(Math.max(0, Math.round(p.x)), x2 - AB_MIN);
       if (d.handle.includes('e')) x2 = Math.max(Math.round(p.x), x1 + AB_MIN);
-      if (d.handle.includes('n')) y1 = Math.min(Math.max(0, Math.round(p.y)), y2 - AB_MIN);
+      if (d.handle.includes('n')) y1 = Math.min(Math.max(AB_TOP, Math.round(p.y)), y2 - AB_MIN);
       if (d.handle.includes('s')) y2 = Math.max(Math.round(p.y), y1 + AB_MIN);
       a.x = x1; a.y = y1; a.width = x2 - x1; a.height = y2 - y1;
       growCanvasLive();
@@ -5106,12 +5321,7 @@
     for (const a of abList()) {
       ctx.fillStyle = a === act ? colors.accent : 'rgba(255,255,255,0.75)';
       const label = abLabelText(a);
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(a.x, a.y - 30 * s, a.width, 30 * s);
-      ctx.clip();
       ctx.fillText(label, a.x, a.y - 6 * s);
-      ctx.restore();
     }
     if (act) {
       ctx.lineWidth = (abSelected ? 4 : 2) * s;
@@ -5163,8 +5373,11 @@
       add(w);
     };
     f('Name', name);
-    f('Width', numberInput(a.width, AB_MIN, MAX_DOC - 2 * AB_MARGIN, (v) => change(() => { a.width = v; fitPasteboard(); })));
-    f('Height', numberInput(a.height, AB_MIN, MAX_DOC - 2 * AB_MARGIN, (v) => change(() => { a.height = v; fitPasteboard(); })));
+    const wIn = numberInput(a.width, AB_MIN, MAX_DOC - 2 * AB_MARGIN, (v) => change(() => { a.width = v; fitPasteboard(); }));
+    const hIn = numberInput(a.height, AB_MIN, MAX_DOC - 2 * AB_MARGIN, (v) => change(() => { a.height = v; fitPasteboard(); }));
+    wIn.style.width = hIn.style.width = '84px'; // 4-digit sizes need room
+    f('Width', wIn);
+    f('Height', hIn);
     const bg = el('input');
     bg.type = 'color';
     bg.value = a.background || '#ffffff';
@@ -5173,11 +5386,19 @@
     f('Color', bg);
     const preset = el('select');
     preset.append(new Option('Size…', ''));
-    PRESETS.forEach((pr, i) => preset.append(new Option(pr.name + '  ' + pr.w + '×' + pr.h, String(i))));
+    PRESET_GROUPS.forEach((g, gi) => {
+      if (g.name === 'Popular') return;
+      const og = document.createElement('optgroup');
+      og.label = g.name;
+      g.items.forEach((pr, i) => og.append(new Option(pr.name + '  ' + pr.w + '×' + pr.h, gi + ':' + i)));
+      preset.append(og);
+    });
     preset.addEventListener('change', () => {
-      const pr = PRESETS[Number(preset.value)];
+      const [gi, i] = preset.value.split(':').map(Number);
+      const pr = PRESET_GROUPS[gi] && PRESET_GROUPS[gi].items[i];
       if (pr) change(() => { a.width = Math.min(pr.w, MAX_DOC - 2 * AB_MARGIN); a.height = Math.min(pr.h, MAX_DOC - 2 * AB_MARGIN); fitPasteboard(); });
     });
+    preset.style.width = '130px';
     add(preset);
     add(el('span', 'opt-sep'));
     add(actionButton('+ Add', 'Add an empty artboard next to this one', false, () => addArtboard(a, false)));
@@ -5365,7 +5586,7 @@
       if (tool === 'cutout' && cutout) endCutout(true);
       finishTextEdit();
       if (penDraft) finishPen(false, false);
-      if (name !== 'marquee') marq = null;
+      if (name !== 'marquee' && name !== 'wand') marq = null;
       cropBox = null;
       hoverPt = null;
       gradDraft = null;
@@ -5384,6 +5605,8 @@
     document.querySelectorAll('.rail-btn[data-tool]').forEach((b) => {
       b.classList.toggle('tool-active', b.dataset.tool === name);
     });
+    if (typeof showInGroup === 'function') showInGroup(name);
+    if (typeof closeFlyout === 'function') closeFlyout();
     updatePanClasses();
     renderToolOptions();
     renderFloatBar();
@@ -5393,6 +5616,438 @@
   document.querySelectorAll('.rail-btn[data-tool]').forEach((b) => {
     b.addEventListener('click', () => setTool(b.dataset.tool));
   });
+
+  // ---------- Tool groups ----------
+  // Like Photoshop: tools that belong together share one rail button.
+  // The button shows the last tool you used; hold it, right-click it, or click
+  // the small corner mark to see the others.
+  const TOOL_GROUPS = [
+    ['select', 'artboard', 'warp'],
+    ['eraser', 'cutout'],
+    ['gradient', 'bucket'],
+  ];
+  const groupOf = {};
+  const flyout = el('div', 'tool-flyout');
+  flyout.hidden = true;
+  document.body.append(flyout);
+  let flyGroup = null;
+
+  function closeFlyout() {
+    if (!flyGroup) return;
+    flyout.hidden = true;
+    flyGroup = null;
+  }
+
+  function openFlyout(g) {
+    flyout.replaceChildren();
+    for (const name of g.tools) {
+      const src = document.querySelector('.rail-btn[data-tool="' + name + '"]');
+      if (src.hidden) continue;
+      const m = src.title.match(/^(.*?)\s*\((\w)\b/);
+      const item = el('button', 'tool-fly-item' + (name === tool ? ' on' : ''));
+      item.type = 'button';
+      item.innerHTML = src.innerHTML;
+      item.append(el('span', 'tool-fly-name', m ? m[1] : src.title), el('span', 'tool-fly-key', m ? m[2] : ''));
+      item.addEventListener('click', () => { closeFlyout(); setTool(name); });
+      flyout.append(item);
+    }
+    const r = g.box.getBoundingClientRect();
+    flyout.hidden = false;
+    const fw = flyout.offsetWidth, fh = flyout.offsetHeight;
+    let left = r.right + 8, top = r.top;
+    if (left + fw > innerWidth - 8) { left = Math.max(8, r.left); top = r.bottom + 8; }
+    if (top + fh > innerHeight - 8) top = Math.max(8, innerHeight - 8 - fh);
+    flyout.style.left = left + 'px';
+    flyout.style.top = top + 'px';
+    flyGroup = g;
+  }
+
+  function showInGroup(name) {
+    const g = groupOf[name];
+    if (!g) return;
+    for (const b of g.btns) b.classList.toggle('g-off', b.dataset.tool !== name);
+  }
+
+  for (const tools of TOOL_GROUPS) {
+    const btns = tools.map((t) => document.querySelector('.rail-btn[data-tool="' + t + '"]')).filter(Boolean);
+    if (btns.length < 2) continue;
+    const box = el('div', 'tool-group');
+    btns[0].before(box);
+    box.append(...btns);
+    const caret = el('span', 'tool-caret');
+    caret.title = 'More tools';
+    box.append(caret);
+    const g = { tools, btns, box };
+    for (const t of tools) groupOf[t] = g;
+    showInGroup(tools[0]);
+    const toggle = () => (flyGroup === g ? closeFlyout() : openFlyout(g));
+    caret.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); toggle(); });
+    box.addEventListener('contextmenu', (e) => { e.preventDefault(); openFlyout(g); });
+    let hold = 0, held = false;
+    box.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      held = false;
+      hold = setTimeout(() => { hold = 0; held = true; openFlyout(g); }, 350);
+    });
+    // after a long press, letting go keeps the list open instead of picking the tool
+    box.addEventListener('click', (e) => { if (held) { held = false; e.stopPropagation(); } }, true);
+    const stop = () => { if (hold) { clearTimeout(hold); hold = 0; } };
+    box.addEventListener('pointerup', stop);
+    box.addEventListener('pointerleave', stop);
+  }
+
+  document.addEventListener('pointerdown', (e) => {
+    if (flyGroup && !flyout.contains(e.target) && !flyGroup.box.contains(e.target)) closeFlyout();
+  });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeFlyout(); });
+
+  // ---------- Colour swatches (bottom of the tool bar, like Photoshop) ----------
+  // Front square = foreground colour (what you paint with), back square = background.
+  const railColors = el('div', 'rail-colors');
+  const swFg = el('button', 'sw sw-fg');
+  const swBg = el('button', 'sw sw-bg');
+  const swSwap = el('button', 'sw-mini sw-swap');
+  const swReset = el('button', 'sw-mini sw-reset');
+  swFg.type = swBg.type = swSwap.type = swReset.type = 'button';
+  swFg.title = 'Foreground colour (click to change)';
+  swBg.title = 'Background colour (click to change)';
+  swSwap.title = 'Swap colours (X)';
+  swReset.title = 'Black and white (D)';
+  swSwap.innerHTML = '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M3 2h5a2 2 0 0 1 2 2v5"/><path d="M1.5 3.5L3 2l1.5 1.5" /><path d="M8.5 7.5L10 9l1.5-1.5" transform="translate(-1.5 0)"/></svg>';
+  swReset.innerHTML = '<span class="mini-bg"></span><span class="mini-fg"></span>';
+  const pickers = {};
+  for (const [key, btn] of [['fg', swFg], ['bg', swBg]]) {
+    const input = el('input');
+    input.type = 'color';
+    input.className = 'sw-input';
+    input.tabIndex = -1;
+    input.addEventListener('input', () => { paint[key] = input.value; syncColors(); });
+    btn.addEventListener('click', () => { input.value = paint[key]; input.click(); });
+    pickers[key] = input;
+    railColors.append(input);
+  }
+  swSwap.addEventListener('click', swapColors);
+  swReset.addEventListener('click', resetColors);
+  railColors.append(swBg, swFg, swSwap, swReset);
+  {
+    const tabsStart = document.querySelector('.rail-btn[data-tab]');
+    const divider = tabsStart && tabsStart.previousElementSibling;
+    (divider && divider.classList.contains('rail-divider') ? divider : tabsStart).before(railColors);
+  }
+
+  function syncColors() {
+    swFg.style.background = paint.fg;
+    swBg.style.background = paint.bg;
+    if (swatchInputs.fg && swatchInputs.fg.isConnected) swatchInputs.fg.value = paint.fg;
+    if (swatchInputs.bg && swatchInputs.bg.isConnected) swatchInputs.bg.value = paint.bg;
+  }
+
+  function swapColors() {
+    [paint.fg, paint.bg] = [paint.bg, paint.fg];
+    syncColors();
+  }
+
+  function resetColors() {
+    paint.fg = '#000000';
+    paint.bg = '#ffffff';
+    syncColors();
+  }
+  syncColors();
+
+  // ---------- Layers panel buttons (bottom row, like Photoshop) ----------
+  $('lf-mask').addEventListener('click', () => (selected() ? addMask('show') : toast('Click a layer first.')));
+  $('lf-adjust').addEventListener('click', () => setTab('raw'));
+  $('lf-new').addEventListener('click', () => newEmptyLayer());
+  $('lf-delete').addEventListener('click', () => (sel.length ? deleteLayers(sel.slice()) : toast('Click a layer first.')));
+
+  // ---------- Selection commands (Select menu) ----------
+  let lastMarq = null;
+
+  function useSelectTool() {
+    if (tool !== 'marquee' && tool !== 'wand') {
+      const keep = marq;
+      setTool('marquee');
+      marq = keep;
+    }
+  }
+
+  function afterSelectChange() {
+    renderToolOptions();
+    renderMaskRow();
+    render();
+  }
+
+  function selectAll() {
+    useSelectTool();
+    const wr = workRect();
+    marq = { kind: 'rect', x: wr.x, y: wr.y, w: wr.width, h: wr.height };
+    afterSelectChange();
+  }
+
+  function deselect() {
+    if (marq) lastMarq = marq;
+    marq = null;
+    afterSelectChange();
+  }
+
+  function reselect() {
+    if (!lastMarq) return;
+    useSelectTool();
+    marq = lastMarq;
+    afterSelectChange();
+  }
+
+  function invertSelection() {
+    if (!marq) return;
+    useSelectTool();
+    if (marq.inv) { marq = marq.inv; afterSelectChange(); return; }
+    if (marq.pix) {
+      const p = marq.pix;
+      const l = getLayer(p.id);
+      if (l && l.x === p.x && l.y === p.y) {
+        const data = new Uint8Array(p.data.length);
+        for (let i = 0; i < data.length; i++) data[i] = p.data[i] ? 0 : 1;
+        setWandSelection(l, { sx: p.sx, sy: p.sy }, data, p.w, p.h);
+        return;
+      }
+    }
+    // everything on the artwork except the area: the outside goes one way round, the hole the other
+    const wr = workRect();
+    const path = new Path2D();
+    path.rect(wr.x, wr.y, wr.width, wr.height);
+    const m = marq;
+    if (m.kind === 'ellipse') {
+      path.ellipse(m.x + m.w / 2, m.y + m.h / 2, m.w / 2, m.h / 2, 0, 0, Math.PI * 2, true);
+    } else {
+      path.moveTo(m.x, m.y);
+      path.lineTo(m.x, m.y + m.h);
+      path.lineTo(m.x + m.w, m.y + m.h);
+      path.lineTo(m.x + m.w, m.y);
+      path.closePath();
+    }
+    marq = { kind: 'path', x: wr.x, y: wr.y, w: wr.width, h: wr.height, path, outline: path, inv: m };
+    afterSelectChange();
+  }
+
+  // Fill the selected area (or the whole layer) with a colour. With no layer picked,
+  // it colours the background, like filling the Background layer in Photoshop.
+  function fillWith(color) {
+    const l = selected();
+    if (!l) {
+      if (sel.length > 1) { toast('Pick just one layer to fill.'); return; }
+      change(() => {
+        const a = activeAb() || state.doc;
+        a.background = color;
+        a.transparent = false;
+      });
+      return;
+    }
+    if (!l.visible) { toast('Show the layer first.'); return; }
+    if (l.rotation || l.warp) { toast('Set the rotation back to 0 and reset any bend first.'); return; }
+    const raster = rasterize(l);
+    const g = raster.canvas.getContext('2d');
+    g.setTransform(raster.sx, 0, 0, raster.sy, -l.x * raster.sx, -l.y * raster.sy);
+    g.fillStyle = color;
+    if (marq) g.fill(regionPath(marq));
+    else g.fillRect(l.x, l.y, l.width, l.height);
+    change(() => putPixels(l, raster.canvas));
+  }
+
+  function newEmptyLayer() {
+    finishTextEdit();
+    change(() => {
+      const l = newPaintLayer();
+      l.name = 'Layer ' + state.layers.length;
+    });
+  }
+
+  function layerToEnd(top) {
+    const l = selected();
+    if (!l) return;
+    change(() => {
+      const i = state.layers.indexOf(l);
+      state.layers.splice(i, 1);
+      if (top) state.layers.push(l);
+      else state.layers.unshift(l);
+    });
+  }
+
+  function exportAs(format) {
+    $('export-format').value = format;
+    $('export-format').dispatchEvent(new Event('change'));
+    exportImage();
+  }
+
+  // ---------- Menu bar ----------
+  // Photoshop's menus, with the same shortcuts. Every item runs something the
+  // app already does, so the menus and the buttons always agree.
+  const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+  const hasLayer = () => !!selected();
+  const hasLayers = () => sel.length > 0;
+  const hasMask = () => !!(selected() && selected().mask);
+
+  const MENUS = [
+    ['File', [
+      ['New…', 'Ctrl+N', () => $('btn-new').click()],
+      ['Open / Upload image…', 'Ctrl+O', () => fileInput.click()],
+      ['Place image…', 'Ctrl+Shift+P', () => fileInput.click()],
+      '-',
+      ['Export as PNG', 'Ctrl+Alt+Shift+W', () => exportAs('png')],
+      ['Export as JPG', '', () => exportAs('jpeg')],
+    ]],
+    ['Edit', [
+      ['Undo', 'Ctrl+Z', () => undo(), () => undoStack.length > 0],
+      ['Redo', 'Ctrl+Shift+Z', () => redo(), () => redoStack.length > 0],
+      '-',
+      ['Fill with foreground', 'Alt+Backspace', () => fillWith(paint.fg)],
+      ['Fill with background', 'Ctrl+Backspace', () => fillWith(paint.bg)],
+      ['Clear', 'Delete', () => (marq && selected() ? marqueeOp('erase') : deleteLayers(sel.slice())), hasLayers],
+      '-',
+      ['Free Transform', 'Ctrl+T', () => { setTool('select'); if (!sel.length) toast('Click a layer to transform it.'); }],
+      ['Skew / Perspective / Distort', '', () => setTool('warp')],
+      ['Flip Horizontal', '', () => flipSelected('x'), hasLayers],
+      ['Flip Vertical', '', () => flipSelected('y'), hasLayers],
+    ]],
+    ['Image', [
+      ['Adjustments (Camera Raw)…', '', () => setTab('raw')],
+      '-',
+      ['Crop', '', () => setTool('crop')],
+      ['Remove Background', '', () => setTool('cutout'), hasLayer],
+    ]],
+    ['Layer', [
+      ['New Layer', 'Ctrl+Shift+N', newEmptyLayer],
+      ['Duplicate Layer', 'Ctrl+J', () => {
+        if (marq && selected()) marqueeOp('copy');
+        else if (sel.length) duplicateLayers(sel.slice());
+        else if (isMulti() && abSelected) addArtboard(activeAb(), true, 'right');
+      }, () => hasLayers() || (isMulti() && abSelected)],
+      ['Layer via Cut', 'Ctrl+Shift+J', () => marqueeOp('cut'), () => !!(marq && selected())],
+      ['Delete Layer', '', () => deleteLayers(sel.slice()), hasLayers],
+      '-',
+      ['Mask: Reveal All', '', () => addMask('show'), () => hasLayer() && !hasMask()],
+      ['Mask: Hide All', '', () => addMask('hide'), () => hasLayer() && !hasMask()],
+      ['Mask: Reveal Selection', '', () => addMask('selection'), () => hasLayer() && !hasMask() && !!marq],
+      ['Mask: Invert', '', invertMask, hasMask],
+      ['Mask: Turn On / Off', '', toggleMask, hasMask],
+      ['Mask: Delete', '', removeMask, hasMask],
+      '-',
+      ['Bring to Front', 'Ctrl+Shift+]', () => layerToEnd(true), hasLayer],
+      ['Bring Forward', 'Ctrl+]', () => moveLayer(sel[0], 1), hasLayer],
+      ['Send Backward', 'Ctrl+[', () => moveLayer(sel[0], -1), hasLayer],
+      ['Send to Back', 'Ctrl+Shift+[', () => layerToEnd(false), hasLayer],
+    ]],
+    ['Select', [
+      ['All', 'Ctrl+A', selectAll],
+      ['Deselect', 'Ctrl+D', deselect, () => !!marq],
+      ['Reselect', 'Ctrl+Shift+D', reselect, () => !!lastMarq],
+      ['Inverse', 'Ctrl+Shift+I', invertSelection, () => !!marq],
+    ]],
+    ['Filter', [
+      ['Camera Raw Filter…', 'Ctrl+Shift+A', () => setTab('raw')],
+    ]],
+    ['View', [
+      ['Zoom In', 'Ctrl+=', () => zoomBy(1.25)],
+      ['Zoom Out', 'Ctrl+-', () => zoomBy(0.8)],
+      ['Fit on Screen', 'Ctrl+0', () => { fitToScreen(); render(); drawRulers(); }],
+      ['100%', 'Ctrl+1', () => { const r = workspace.getBoundingClientRect(); setZoom(1, r.left + r.width / 2, r.top + r.height / 2); }],
+    ]],
+    ['Window', [
+      ['Layers', 'F7', () => setTab('layers')],
+      ['Properties', '', () => setTab('design')],
+      ['Camera Raw', '', () => setTab('raw')],
+    ]],
+  ];
+
+  // "Ctrl+Shift+]" -> what to show on screen (⌘⇧] on a Mac)
+  function keyLabel(k) {
+    if (!k) return '';
+    if (!IS_MAC) return k;
+    return k.replace('Ctrl+', '⌘').replace('Alt+', '⌥').replace('Shift+', '⇧').replace('Backspace', '⌫');
+  }
+
+  // The key that was pressed, written the same way as in MENUS.
+  function pressedKey(e) {
+    const c = e.code;
+    let k = c.startsWith('Key') ? c.slice(3) : c.startsWith('Digit') ? c.slice(5)
+      : ({ BracketLeft: '[', BracketRight: ']', Equal: '=', Minus: '-', NumpadAdd: '=', NumpadSubtract: '-' })[c] || e.key;
+    if (k.length === 1) k = k.toUpperCase();
+    return (e.ctrlKey || e.metaKey ? 'Ctrl+' : '') + (e.altKey ? 'Alt+' : '') + (e.shiftKey ? 'Shift+' : '') + k;
+  }
+
+  const shortcutMap = new Map();
+  for (const [, items] of MENUS) {
+    for (const it of items) {
+      if (it === '-' || !it[1] || it[1] === 'Delete') continue; // Delete is already handled by the main key handler
+      // store with modifiers in one fixed order: Ctrl, Alt, Shift
+      const parts = it[1].split('+');
+      const key = parts.pop() || '+';
+      const norm = (parts.includes('Ctrl') ? 'Ctrl+' : '') + (parts.includes('Alt') ? 'Alt+' : '') + (parts.includes('Shift') ? 'Shift+' : '') + (key.length === 1 ? key.toUpperCase() : key);
+      shortcutMap.set(norm, it);
+    }
+  }
+
+  const menubar = el('nav', 'menubar');
+  menubar.setAttribute('aria-label', 'Menus');
+  const menuPop = el('div', 'menu-pop');
+  menuPop.hidden = true;
+  document.body.append(menuPop);
+  let openMenu = null;
+
+  function closeMenu() {
+    if (!openMenu) return;
+    openMenu.btn.classList.remove('open');
+    menuPop.hidden = true;
+    openMenu = null;
+  }
+
+  function showMenu(btn, items) {
+    closeMenu();
+    menuPop.replaceChildren();
+    for (const it of items) {
+      if (it === '-') { menuPop.append(el('div', 'menu-sep')); continue; }
+      const [label, keys, run, ok] = it;
+      const b = el('button', 'menu-item');
+      b.type = 'button';
+      b.disabled = ok ? !ok() : false;
+      b.append(el('span', 'menu-label', label), el('span', 'menu-key', keyLabel(keys)));
+      b.addEventListener('click', () => { closeMenu(); run(); });
+      menuPop.append(b);
+    }
+    const r = btn.getBoundingClientRect();
+    menuPop.hidden = false;
+    menuPop.style.left = Math.min(r.left, innerWidth - menuPop.offsetWidth - 8) + 'px';
+    menuPop.style.top = r.bottom + 4 + 'px';
+    btn.classList.add('open');
+    openMenu = { btn, items };
+  }
+
+  for (const [name, items] of MENUS) {
+    const b = el('button', 'menu-btn', name);
+    b.type = 'button';
+    b.addEventListener('click', () => (openMenu && openMenu.btn === b ? closeMenu() : showMenu(b, items)));
+    b.addEventListener('mouseenter', () => { if (openMenu && openMenu.btn !== b) showMenu(b, items); });
+    menubar.append(b);
+  }
+  document.querySelector('.topbar .brand').after(menubar);
+
+  document.addEventListener('pointerdown', (e) => {
+    if (openMenu && !menuPop.contains(e.target) && !menubar.contains(e.target)) closeMenu();
+  });
+
+  // Runs before the other key handlers, so Photoshop's shortcuts win.
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && openMenu) { closeMenu(); e.stopPropagation(); return; }
+    if (newDialog.open || fontsDialog.open) return;
+    const t = e.target;
+    if ((t instanceof HTMLInputElement && t.type !== 'range') || t instanceof HTMLSelectElement || t instanceof HTMLTextAreaElement || (t && t.isContentEditable)) return;
+    const it = shortcutMap.get(pressedKey(e));
+    if (!it) return;
+    e.preventDefault();
+    e.stopPropagation();
+    closeMenu();
+    if (it[3] && !it[3]()) return;
+    it[2]();
+  }, true);
 
   // Capture phase: runs before the canvas gets the click, so panning never moves a layer.
   workspace.addEventListener('pointerdown', (e) => {
@@ -5440,7 +6095,7 @@
 
   // ---------- Keyboard ----------
 
-  const TOOL_KEYS = { v: 'select', m: 'marquee', c: 'crop', t: 'text', u: 'shape', p: 'pen', b: 'brush', e: 'eraser', k: 'bucket', g: 'gradient', i: 'eyedropper', d: 'warp', h: 'hand', a: 'artboard', x: 'cutout' };
+  const TOOL_KEYS = { v: 'select', m: 'marquee', c: 'crop', t: 'text', u: 'shape', p: 'pen', b: 'brush', e: 'eraser', k: 'bucket', g: 'gradient', i: 'eyedropper', h: 'hand', a: 'artboard', w: 'wand' };
 
   document.addEventListener('keydown', (e) => {
     if (newDialog.open || fontsDialog.open) return;
@@ -5468,10 +6123,6 @@
     } else if (mod && key === 'y') {
       e.preventDefault();
       redo();
-    } else if (mod && key === 'd') {
-      e.preventDefault();
-      if (isMulti() && !sel.length && abSelected) addArtboard(activeAb(), true, 'right');
-      else if (sel.length) duplicateLayers(sel.slice());
     } else if (mod) {
       return;
     } else if (tool === 'crop' && cropBox && e.key === 'Enter') {
@@ -5498,7 +6149,7 @@
     } else if (e.key === 'Delete' || e.key === 'Backspace') {
       e.preventDefault();
       if (isMulti() && !sel.length && (tool === 'artboard' || (tool === 'select' && abSelected))) deleteArtboard(activeAb());
-      else if (tool === 'marquee' && marq) marqueeOp('erase');
+      else if (marq && selected()) marqueeOp('erase');
       else if (sel.length) deleteLayers(sel.slice());
     } else if (e.key.startsWith('Arrow') && sel.length && !(t instanceof HTMLInputElement)) {
       e.preventDefault();
@@ -5519,12 +6170,23 @@
       fitToScreen();
       render();
       drawRulers();
+    } else if (key === 'd' && !e.shiftKey && !e.altKey) {
+      resetColors();
+    } else if (key === 'x' && !e.shiftKey && !e.altKey) {
+      swapColors();
     } else if (TOOL_KEYS[key]) {
       if (TOOL_KEYS[key] === 'artboard' && !isMulti()) {
         toast('Make a new file with “Artboards” ticked to use artboards.');
         return;
       }
-      setTool(TOOL_KEYS[key]);
+      let next = TOOL_KEYS[key];
+      // Shift + the letter steps through the tools that share a button (like Photoshop)
+      const g = e.shiftKey && groupOf[next];
+      if (g && g.tools.includes(tool)) {
+        const list = g.tools.filter((t) => !document.querySelector('.rail-btn[data-tool="' + t + '"]').hidden);
+        next = list[(list.indexOf(tool) + 1) % list.length];
+      }
+      setTool(next);
     }
   });
 
