@@ -5858,6 +5858,95 @@
   $('lf-new').addEventListener('click', () => newEmptyLayer());
   $('lf-delete').addEventListener('click', () => (sel.length ? deleteLayers(sel.slice()) : toast('Click a layer first.')));
 
+  // ---------- Canvas Size and Image Size (Image menu) ----------
+  // Canvas Size: more or less room around the artwork; nothing is stretched.
+  // Image Size: the whole artwork, every layer included, gets bigger or smaller.
+  const sizeDialog = $('size-dialog');
+  const sizeW = $('size-w'), sizeH = $('size-h'), sizeLock = $('size-lock');
+  let sizeMode = 'canvas';
+  let anchor = [0.5, 0.5];
+  const anchorBtns = [];
+  for (let r = 0; r < 3; r++) {
+    for (let c = 0; c < 3; c++) {
+      const b = el('button', 'anchor-cell');
+      b.type = 'button';
+      b.title = ['Top', 'Middle', 'Bottom'][r] + ' ' + ['left', 'centre', 'right'][c];
+      b.addEventListener('click', () => { anchor = [c / 2, r / 2]; paintAnchor(); });
+      anchorBtns.push(b);
+      $('size-anchor').append(b);
+    }
+  }
+  function paintAnchor() {
+    anchorBtns.forEach((b, i) => b.classList.toggle('on', i % 3 === anchor[0] * 2 && Math.floor(i / 3) === anchor[1] * 2));
+  }
+
+  function openSizeDialog(mode) {
+    if (isMulti()) { toast('This file has artboards: drag the artboard edges with the Artboard tool to resize them.'); return; }
+    finishTextEdit();
+    sizeMode = mode;
+    const d = state.doc;
+    $('size-title').textContent = mode === 'canvas' ? 'Canvas size' : 'Image size';
+    $('size-now').textContent = 'Now ' + d.width + ' × ' + d.height + ' px. ' +
+      (mode === 'canvas' ? 'Layers keep their size; the edges move.' : 'Everything is scaled, layers too.');
+    sizeW.value = d.width;
+    sizeH.value = d.height;
+    $('size-lock-row').hidden = mode === 'canvas';
+    $('size-anchor-row').hidden = mode !== 'canvas';
+    anchor = [0.5, 0.5];
+    paintAnchor();
+    sizeDialog.showModal();
+    sizeW.select();
+  }
+
+  sizeW.addEventListener('input', () => {
+    if (sizeMode === 'image' && sizeLock.checked && sizeW.value) sizeH.value = Math.max(1, Math.round(sizeW.value * state.doc.height / state.doc.width));
+  });
+  sizeH.addEventListener('input', () => {
+    if (sizeMode === 'image' && sizeLock.checked && sizeH.value) sizeW.value = Math.max(1, Math.round(sizeH.value * state.doc.width / state.doc.height));
+  });
+
+  sizeDialog.addEventListener('close', () => {
+    if (sizeDialog.returnValue !== 'ok') return;
+    const d = state.doc;
+    const w = clamp(Math.round(Number(sizeW.value)) || d.width, 1, MAX_DOC);
+    const h = clamp(Math.round(Number(sizeH.value)) || d.height, 1, MAX_DOC);
+    if (w === d.width && h === d.height) return;
+    marq = null;
+    cropBox = null;
+    if (sizeMode === 'canvas') {
+      const dx = Math.round((w - d.width) * anchor[0]);
+      const dy = Math.round((h - d.height) * anchor[1]);
+      change(() => {
+        for (const l of state.layers) { l.x += dx; l.y += dy; }
+        d.width = w;
+        d.height = h;
+        d.autoSize = false;
+      });
+    } else {
+      const sx = w / d.width, sy = h / d.height;
+      const sm = Math.sqrt(sx * sy); // for things that have one size, like text and line widths
+      change(() => {
+        for (const l of state.layers) {
+          l.x *= sx; l.y *= sy;
+          l.width *= sx; l.height *= sy;
+          if (l.type === 'text') {
+            l.size = Math.max(1, l.size * sm);
+            if (l.strokeWidth) l.strokeWidth *= sm;
+          } else {
+            if (l.strokeWidth) l.strokeWidth *= sm;
+            if (l.radius) l.radius *= sm;
+          }
+        }
+        d.width = w;
+        d.height = h;
+        d.autoSize = false;
+      });
+    }
+    fitToScreen();
+    render();
+    drawRulers();
+  });
+
   // ---------- Selection commands (Select menu) ----------
   let lastMarq = null;
 
@@ -6011,6 +6100,9 @@
     ['Image', [
       ['Adjustments (Camera Raw)…', '', () => setTab('raw')],
       '-',
+      ['Image Size…', 'Ctrl+Alt+I', () => openSizeDialog('image')],
+      ['Canvas Size…', 'Ctrl+Alt+C', () => openSizeDialog('canvas')],
+      '-',
       ['Crop', '', () => setTool('crop')],
       ['Remove Background', '', () => setTool('cutout'), hasLayer],
     ]],
@@ -6137,7 +6229,7 @@
   // Runs before the other key handlers, so Photoshop's shortcuts win.
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && openMenu) { closeMenu(); e.stopPropagation(); return; }
-    if (newDialog.open || fontsDialog.open) return;
+    if (document.querySelector('dialog[open]')) return;
     const t = e.target;
     if ((t instanceof HTMLInputElement && t.type !== 'range') || t instanceof HTMLSelectElement || t instanceof HTMLTextAreaElement || (t && t.isContentEditable)) return;
     const it = shortcutMap.get(pressedKey(e));
@@ -6198,7 +6290,7 @@
   const TOOL_KEYS = { v: 'select', m: 'marquee', c: 'crop', t: 'text', u: 'shape', p: 'pen', b: 'brush', e: 'eraser', k: 'bucket', g: 'gradient', i: 'eyedropper', h: 'hand', a: 'artboard', w: 'wand' };
 
   document.addEventListener('keydown', (e) => {
-    if (newDialog.open || fontsDialog.open) return;
+    if (document.querySelector('dialog[open]')) return;
     const t = e.target;
     const typing =
       (t instanceof HTMLInputElement && t.type !== 'range') ||
