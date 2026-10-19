@@ -4658,13 +4658,14 @@
         h = Math.max(1, Math.round(h * s));
       }
 
+      const r = workRect(); // read again: the document may have just changed size
       state.layers.push({
         id,
         type: 'image',
         img: key,
         name: file.name,
-        x: Math.round(wr.x + (wr.width - w) / 2),
-        y: Math.round(wr.y + (wr.height - h) / 2),
+        x: Math.round(r.x + (r.width - w) / 2),
+        y: Math.round(r.y + (r.height - h) / 2),
         width: w,
         height: h,
         opacity: 1,
