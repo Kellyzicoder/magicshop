@@ -4805,6 +4805,10 @@
 
   async function addImageFiles(files) {
     for (const file of files) {
+      if (file.name.toLowerCase().endsWith('.mshop')) {
+        await openProject(file);
+        continue;
+      }
       if (!file.type.startsWith('image/')) {
         toast('"' + file.name + '" is not an image.');
         continue;
@@ -5504,6 +5508,100 @@
 
   const canvasBlob = (cv, type) => new Promise((resolve) => cv.toBlob(resolve, type, 0.92));
 
+  // ---------- Project files (.mshop) ----------
+  // A project is a zip: project.json (layers, artboards, settings) plus one PNG for
+  // every picture and mask. Open it again later and everything is still editable.
+  const PROJECT_EXT = '.mshop';
+
+  async function saveProject() {
+    finishTextEdit();
+    const text = snapshot();
+    const used = [...new Set([...text.matchAll(/"img":"(img-\d+)"/g)].map((m) => m[1]))];
+    const enc = new TextEncoder();
+    const files = [];
+    for (const key of used) {
+      const src = images.get(key);
+      if (!src) continue;
+      const c = document.createElement('canvas');
+      c.width = srcW(src);
+      c.height = srcH(src);
+      c.getContext('2d').drawImage(src, 0, 0);
+      const blob = await canvasBlob(c, 'image/png');
+      files.push({ name: 'images/' + key + '.png', data: new Uint8Array(await blob.arrayBuffer()) });
+    }
+    const meta = { app: 'MagicShop', version: 1, state: JSON.parse(text) };
+    files.unshift({ name: 'project.json', data: enc.encode(JSON.stringify(meta)) });
+    await saveBlob(makeZip(files), (slug(state.doc.name) || 'artwork') + PROJECT_EXT);
+  }
+
+  // Reads the files out of a zip that MagicShop wrote (files are stored, not squeezed).
+  function readZip(buf) {
+    const v = new DataView(buf);
+    let e = buf.byteLength - 22;
+    while (e >= 0 && v.getUint32(e, true) !== 0x06054b50) e--;
+    if (e < 0) throw new Error('This is not a MagicShop project.');
+    const count = v.getUint16(e + 10, true);
+    let p = v.getUint32(e + 16, true);
+    const out = new Map();
+    const dec = new TextDecoder();
+    for (let i = 0; i < count; i++) {
+      if (v.getUint32(p, true) !== 0x02014b50) throw new Error('This project file is damaged.');
+      const method = v.getUint16(p + 10, true);
+      const size = v.getUint32(p + 20, true);
+      const nameLen = v.getUint16(p + 28, true);
+      const extraLen = v.getUint16(p + 30, true);
+      const commentLen = v.getUint16(p + 32, true);
+      const local = v.getUint32(p + 42, true);
+      const name = dec.decode(new Uint8Array(buf, p + 46, nameLen));
+      if (method !== 0) throw new Error('This project file was changed by another program and cannot be opened.');
+      const start = local + 30 + v.getUint16(local + 26, true) + v.getUint16(local + 28, true);
+      out.set(name, new Uint8Array(buf, start, size));
+      p += 46 + nameLen + extraLen + commentLen;
+    }
+    return out;
+  }
+
+  async function openProject(file) {
+    let files, meta;
+    try {
+      files = readZip(await file.arrayBuffer());
+      meta = JSON.parse(new TextDecoder().decode(files.get('project.json')));
+      if (!meta || meta.app !== 'MagicShop' || !meta.state || !Array.isArray(meta.state.layers)) throw new Error();
+    } catch (err) {
+      toast(err && err.message ? err.message : '"' + file.name + '" is not a MagicShop project.');
+      return;
+    }
+    // Give every picture a fresh name so it cannot clash with pictures already open.
+    const rename = new Map();
+    for (const [name, data] of files) {
+      const m = name.match(/^images\/(img-\d+)\.png$/);
+      if (!m) continue;
+      const img = await loadImage(new File([data], m[1] + '.png', { type: 'image/png' })).catch(() => null);
+      if (!img) continue;
+      const key = 'img-' + nextImg++;
+      images.set(key, img);
+      rename.set(m[1], key);
+    }
+    let text = JSON.stringify(meta.state).replace(/"img":"(img-\d+)"/g, (all, k) => '"img":"' + (rename.get(k) || k) + '"');
+    const loaded = JSON.parse(text);
+    // new layers must not reuse ids from the project
+    const most = Math.max(0, ...text.match(/"id":"layer-(\d+)"/g)?.map((s) => Number(s.match(/\d+/)[0])) || [0]);
+    nextId = Math.max(nextId, most + 1);
+    finishTextEdit();
+    if (penDraft) finishPen(false, false);
+    marq = null;
+    maskEditId = null;
+    change(() => {
+      state = loaded;
+      sel = [];
+      activeAbId = state.artboards && state.artboards.length ? state.artboards[0].id : null;
+    });
+    fitToScreen();
+    render();
+    drawRulers();
+    toast('Opened "' + state.doc.name + '".');
+  }
+
   async function exportImage() {
     const jpeg = $('export-format').value === 'jpeg';
     const type = jpeg ? 'image/jpeg' : 'image/png';
@@ -5890,6 +5988,8 @@
     ['File', [
       ['New…', 'Ctrl+N', () => $('btn-new').click()],
       ['Open / Upload image…', 'Ctrl+O', () => fileInput.click()],
+      ['Open Project…', '', () => fileInput.click()],
+      ['Save Project', 'Ctrl+S', () => saveProject()],
       ['Place image…', 'Ctrl+Shift+P', () => fileInput.click()],
       '-',
       ['Export as PNG', 'Ctrl+Alt+Shift+W', () => exportAs('png')],
