@@ -4950,6 +4950,7 @@
   }
 
   async function addImageFiles(files) {
+    files = await takePsdFiles(files);
     for (const file of files) {
       if (!file.type.startsWith('image/')) {
         toast('"' + file.name + '" is not an image.');
@@ -4978,6 +4979,388 @@
     workspace.classList.remove('dragging');
     addImageFiles(Array.from(e.dataTransfer.files));
   });
+
+  // ---------- Opening Photoshop files (.psd / .psb) ----------
+  // Reads the layers (pixels, place, name, opacity, hidden or not, blend mode),
+  // layer masks and groups. Text, shapes and smart objects come in as pictures,
+  // because only their pixels can be read without Photoshop.
+  const PSD_BLENDS = {
+    norm: 'normal', mul: 'multiply', scrn: 'screen', over: 'overlay', sLit: 'soft-light', hLit: 'hard-light',
+    dark: 'darken', lite: 'lighten', 'div': 'color-dodge', idiv: 'color-burn', diff: 'difference', smud: 'exclusion',
+    hue: 'hue', sat: 'saturation', colr: 'color', lum: 'luminosity', lddg: 'color-dodge', lbrn: 'color-burn',
+    dkCl: 'darken', lgCl: 'lighten', vLit: 'hard-light', lLit: 'hard-light', pLit: 'hard-light',
+  };
+  // in a .psb file these blocks have 8-byte lengths
+  const PSB_LONG = new Set(['LMsk', 'Lr16', 'Lr32', 'Layr', 'Mt16', 'Mt32', 'Mtrn', 'Alph', 'FMsk', 'lnk2', 'FEid', 'FXid', 'PxSD']);
+
+  async function inflate(bytes) {
+    const ds = new DecompressionStream('deflate');
+    const out = await new Response(new Blob([bytes]).stream().pipeThrough(ds)).arrayBuffer();
+    return new Uint8Array(out);
+  }
+
+  // Turns one channel's stored bytes into one byte per pixel.
+  async function psdChannel(bytes, w, h, depth, big) {
+    const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const comp = v.getUint16(0);
+    const bpp = depth / 8;
+    const rowBytes = w * bpp;
+    let raw;
+    if (comp === 0) {
+      raw = bytes.subarray(2, 2 + rowBytes * h);
+    } else if (comp === 1) {
+      raw = new Uint8Array(rowBytes * h);
+      const cw = big ? 4 : 2;
+      let p = 2 + h * cw;
+      for (let y = 0; y < h; y++) {
+        const len = big ? v.getUint32(2 + y * 4) : v.getUint16(2 + y * 2);
+        const end = p + len;
+        let o = y * rowBytes;
+        const oEnd = o + rowBytes;
+        while (p < end && o < oEnd) {
+          let n = bytes[p++];
+          if (n < 128) {
+            n += 1;
+            raw.set(bytes.subarray(p, p + n), o);
+            p += n;
+            o += n;
+          } else if (n > 128) {
+            n = 257 - n;
+            raw.fill(bytes[p++], o, o + n);
+            o += n;
+          }
+        }
+        p = end;
+      }
+    } else if (comp === 2 || comp === 3) {
+      raw = await inflate(bytes.subarray(2));
+      if (comp === 3) {
+        // "zip with prediction": each value was stored as the change from the one before it
+        if (bpp === 1) {
+          for (let y = 0; y < h; y++) for (let x = 1; x < w; x++) raw[y * w + x] = (raw[y * w + x] + raw[y * w + x - 1]) & 255;
+        } else if (bpp === 2) {
+          for (let y = 0; y < h; y++) {
+            let prev = 0;
+            for (let x = 0; x < w; x++) {
+              const i = (y * w + x) * 2;
+              prev = (prev + ((raw[i] << 8) | raw[i + 1])) & 65535;
+              raw[i] = prev >> 8;
+              raw[i + 1] = prev & 255;
+            }
+          }
+        }
+      }
+    } else {
+      throw new Error('unknown');
+    }
+    if (bpp === 1) return raw;
+    const out = new Uint8Array(w * h);
+    for (let i = 0; i < out.length; i++) out[i] = raw[i * bpp]; // keep the top byte of 16-bit values
+    return out;
+  }
+
+  function psdCanvas(w, h, mode, ch) {
+    const c = document.createElement('canvas');
+    c.width = w;
+    c.height = h;
+    const g = c.getContext('2d');
+    const img = g.createImageData(w, h);
+    const d = img.data;
+    const A = ch.get(-1);
+    for (let i = 0; i < w * h; i++) {
+      let r, gr, b;
+      if (mode === 1 || mode === 8) {
+        r = gr = b = ch.get(0) ? ch.get(0)[i] : 0;
+      } else if (mode === 4) {
+        const k = ch.get(3) ? ch.get(3)[i] : 255;
+        r = ((ch.get(0) ? ch.get(0)[i] : 255) * k) / 255;
+        gr = ((ch.get(1) ? ch.get(1)[i] : 255) * k) / 255;
+        b = ((ch.get(2) ? ch.get(2)[i] : 255) * k) / 255;
+      } else {
+        r = ch.get(0) ? ch.get(0)[i] : 0;
+        gr = ch.get(1) ? ch.get(1)[i] : 0;
+        b = ch.get(2) ? ch.get(2)[i] : 0;
+      }
+      d[i * 4] = r;
+      d[i * 4 + 1] = gr;
+      d[i * 4 + 2] = b;
+      d[i * 4 + 3] = A ? A[i] : 255;
+    }
+    g.putImageData(img, 0, 0);
+    return c;
+  }
+
+  async function readPsd(buf) {
+    const v = new DataView(buf);
+    const u8 = new Uint8Array(buf);
+    const str = (p, n) => String.fromCharCode(...u8.subarray(p, p + n));
+    if (str(0, 4) !== '8BPS') throw new Error('This is not a Photoshop file.');
+    const version = v.getUint16(4);
+    const big = version === 2;
+    const nChan = v.getUint16(12);
+    const height = v.getUint32(14);
+    const width = v.getUint32(18);
+    const depth = v.getUint16(22);
+    const mode = v.getUint16(24);
+    if (depth !== 8 && depth !== 16) throw new Error('Only 8-bit and 16-bit Photoshop files can be opened (this one is ' + depth + '-bit).');
+    if (![1, 3, 4, 8].includes(mode)) throw new Error('Only RGB, CMYK and Grayscale Photoshop files can be opened.');
+    let p = 26;
+    p += 4 + v.getUint32(p); // colour mode data
+    p += 4 + v.getUint32(p); // image resources
+    const len = (q) => (big ? Number(v.getBigUint64(q)) : v.getUint32(q));
+    const lw = big ? 8 : 4;
+    const lmLen = len(p);
+    const lmStart = p + lw;
+    const layers = [];
+    let skipped = 0;
+    if (lmLen > 0) {
+      const liLen = len(lmStart);
+      const parseLayers = async (q) => {
+        const count = Math.abs(v.getInt16(q));
+        q += 2;
+        const recs = [];
+        for (let n = 0; n < count; n++) {
+          const r = { top: v.getInt32(q), left: v.getInt32(q + 4), bottom: v.getInt32(q + 8), right: v.getInt32(q + 12) };
+          const nc = v.getUint16(q + 16);
+          q += 18;
+          r.channels = [];
+          for (let c = 0; c < nc; c++) {
+            r.channels.push({ id: v.getInt16(q), len: len(q + 2) });
+            q += 2 + lw;
+          }
+          r.blend = str(q + 4, 4).trim();
+          r.opacity = u8[q + 8];
+          r.clipping = u8[q + 9];
+          r.hidden = (u8[q + 10] & 2) !== 0;
+          const extraLen = v.getUint32(q + 12);
+          let e = q + 16;
+          const extraEnd = e + extraLen;
+          const mLen = v.getUint32(e);
+          if (mLen >= 20) {
+            r.mask = { top: v.getInt32(e + 4), left: v.getInt32(e + 8), bottom: v.getInt32(e + 12), right: v.getInt32(e + 16),
+              def: u8[e + 20], disabled: (u8[e + 21] & 2) !== 0 };
+          }
+          e += 4 + mLen;
+          e += 4 + v.getUint32(e); // blending ranges
+          const nameLen = u8[e];
+          r.name = new TextDecoder('latin1').decode(u8.subarray(e + 1, e + 1 + nameLen));
+          e += Math.ceil((nameLen + 1) / 4) * 4;
+          while (e + 12 <= extraEnd) {
+            const sig = str(e, 4);
+            if (sig !== '8BIM' && sig !== '8B64') { e++; continue; } // skip padding
+            const key = str(e + 4, 4);
+            const long = big && PSB_LONG.has(key);
+            const bl = long ? Number(v.getBigUint64(e + 8)) : v.getUint32(e + 8);
+            const data = e + 8 + (long ? 8 : 4);
+            if (key === 'luni') {
+              const n2 = v.getUint32(data);
+              let s = '';
+              for (let k = 0; k < n2; k++) s += String.fromCharCode(v.getUint16(data + 4 + k * 2));
+              r.name = s.replace(/\0+$/, '');
+            } else if (key === 'lsct' || key === 'lsdk') {
+              r.section = v.getUint32(data);
+            } else if (key === 'iOpa') {
+              r.fill = u8[data];
+            }
+            e = data + bl;
+          }
+          q = extraEnd;
+          recs.push(r);
+        }
+        // the pixels, layer by layer, channel by channel
+        for (const r of recs) {
+          r.data = new Map();
+          for (const c of r.channels) {
+            const bytes = u8.subarray(q, q + c.len);
+            q += c.len;
+            const isMask = c.id === -2;
+            const w = isMask ? (r.mask ? r.mask.right - r.mask.left : 0) : r.right - r.left;
+            const h = isMask ? (r.mask ? r.mask.bottom - r.mask.top : 0) : r.bottom - r.top;
+            if (w <= 0 || h <= 0 || c.len < 2 || c.id < -2) continue;
+            try {
+              r.data.set(c.id, await psdChannel(bytes, w, h, depth, big));
+            } catch {
+              r.broken = true;
+            }
+          }
+        }
+        // bottom to top; group markers wrap the layers inside them
+        const open = [];
+        let gid = 0;
+        for (const r of recs) {
+          if (r.section === 3) { open.push({ id: 'grp-' + ++gid, members: [] }); continue; }
+          if (r.section === 1 || r.section === 2) {
+            const grp = open.pop();
+            if (!grp) continue;
+            grp.name = r.name;
+            grp.visible = !r.hidden;
+            grp.open = r.section === 1;
+            // groups inside groups become part of the outer one; a hidden inner group hides its layers
+            if (open.length) {
+              for (const m of grp.members) { if (r.hidden) m.visible = false; open[open.length - 1].members.push(m); }
+            } else {
+              for (const m of grp.members) m.group = grp.id;
+              layers.groups = (layers.groups || []).concat({ id: grp.id, name: grp.name, visible: grp.visible, open: grp.open });
+            }
+            continue;
+          }
+          const w = r.right - r.left, h = r.bottom - r.top;
+          if (w <= 0 || h <= 0 || r.broken) { skipped++; continue; }
+          const L = {
+            name: r.name || 'Layer', left: r.left, top: r.top, width: w, height: h,
+            canvas: psdCanvas(w, h, mode, r.data),
+            opacity: (r.opacity / 255) * (r.fill === undefined ? 1 : r.fill / 255),
+            visible: !r.hidden,
+            blend: PSD_BLENDS[r.blend] || 'normal',
+            clipped: r.clipping === 1,
+          };
+          const mk = r.data.get(-2);
+          if (r.mask && mk) {
+            const mc = document.createElement('canvas');
+            mc.width = w;
+            mc.height = h;
+            const mg = mc.getContext('2d');
+            mg.fillStyle = 'rgba(255,255,255,' + r.mask.def / 255 + ')';
+            mg.fillRect(0, 0, w, h);
+            const mw = r.mask.right - r.mask.left, mh = r.mask.bottom - r.mask.top;
+            const tmp = document.createElement('canvas');
+            tmp.width = mw;
+            tmp.height = mh;
+            const tg = tmp.getContext('2d');
+            const id = tg.createImageData(mw, mh);
+            for (let i = 0; i < mw * mh; i++) { id.data[i * 4] = id.data[i * 4 + 1] = id.data[i * 4 + 2] = 255; id.data[i * 4 + 3] = mk[i]; }
+            tg.putImageData(id, 0, 0);
+            mg.clearRect(r.mask.left - r.left, r.mask.top - r.top, mw, mh);
+            mg.drawImage(tmp, r.mask.left - r.left, r.mask.top - r.top);
+            L.mask = { canvas: mc, on: !r.mask.disabled };
+          }
+          if (open.length) open[open.length - 1].members.push(L);
+          layers.push(L);
+        }
+      };
+      if (liLen > 0) {
+        await parseLayers(lmStart + lw);
+      } else {
+        // 16-bit files keep their layers in an "Lr16" block after the global mask info
+        let t = lmStart + lw + liLen;
+        t += 4 + v.getUint32(t);
+        const end = lmStart + lmLen;
+        while (t + 12 <= end) {
+          const sig = str(t, 4);
+          if (sig !== '8BIM' && sig !== '8B64') { t++; continue; }
+          const key = str(t + 4, 4);
+          const long = big && PSB_LONG.has(key);
+          const bl = long ? Number(v.getBigUint64(t + 8)) : v.getUint32(t + 8);
+          const data = t + 8 + (long ? 8 : 4);
+          if (key === 'Lr16') { await parseLayers(data); break; }
+          t = data + bl;
+        }
+      }
+    }
+    if (!layers.length) {
+      // no layers stored: use the flattened picture at the end of the file
+      let q = lmStart + lmLen;
+      const comp = v.getUint16(q);
+      const bpp = depth / 8;
+      const plane = width * height * bpp;
+      const chans = new Map();
+      if (comp === 0) {
+        for (let c = 0; c < nChan; c++) {
+          const part = new Uint8Array(2 + plane);
+          part.set(u8.subarray(q + 2 + c * plane, q + 2 + (c + 1) * plane), 2);
+          chans.set(c === 3 && mode === 3 ? -1 : c, await psdChannel(part, width, height, depth, big));
+        }
+      } else if (comp === 1) {
+        const cw = big ? 4 : 2;
+        const counts = q + 2;
+        let dataP = counts + nChan * height * cw;
+        for (let c = 0; c < nChan; c++) {
+          let total = 0;
+          const rows = [];
+          for (let y = 0; y < height; y++) {
+            const n = big ? v.getUint32(counts + (c * height + y) * 4) : v.getUint16(counts + (c * height + y) * 2);
+            rows.push(n);
+            total += n;
+          }
+          // rebuild one channel in the per-layer layout so the same reader works
+          const part = new Uint8Array(2 + height * cw + total);
+          const pv = new DataView(part.buffer);
+          pv.setUint16(0, 1);
+          rows.forEach((n, y) => (big ? pv.setUint32(2 + y * 4, n) : pv.setUint16(2 + y * 2, n)));
+          part.set(u8.subarray(dataP, dataP + total), 2 + height * cw);
+          dataP += total;
+          chans.set(c === 3 && mode === 3 ? -1 : c, await psdChannel(part, width, height, depth, big));
+        }
+      } else {
+        throw new Error('This Photoshop file is saved in a way MagicShop cannot read yet.');
+      }
+      layers.push({ name: 'Background', left: 0, top: 0, width, height, canvas: psdCanvas(width, height, mode, chans), opacity: 1, visible: true, blend: 'normal' });
+    }
+    return { width, height, layers, skipped };
+  }
+
+  async function openPsd(file) {
+    let psd;
+    try {
+      psd = await readPsd(await file.arrayBuffer());
+    } catch (err) {
+      toast(err && err.message ? err.message : 'Could not open "' + file.name + '".');
+      return;
+    }
+    // MagicShop's biggest side is MAX_DOC; bigger files are scaled down to fit
+    const s = Math.min(1, MAX_DOC / psd.width, MAX_DOC / psd.height);
+    finishTextEdit();
+    if (penDraft) finishPen(false, false);
+    marq = null;
+    maskEditId = null;
+    const made = [];
+    for (const L of psd.layers) {
+      const key = 'img-' + nextImg++;
+      images.set(key, L.canvas);
+      const l = {
+        id: 'layer-' + nextId++, type: 'image', img: key, name: L.name,
+        x: L.left * s, y: L.top * s, width: L.width * s, height: L.height * s,
+        opacity: L.opacity, visible: L.visible, adjust: defaultAdjust(),
+      };
+      if (L.blend !== 'normal') l.blend = L.blend;
+      if (L.group) l.group = L.group;
+      if (L.mask) {
+        const mk = 'img-' + nextImg++;
+        images.set(mk, L.mask.canvas);
+        l.mask = { img: mk, on: L.mask.on };
+      }
+      made.push(l);
+    }
+    const name = file.name.replace(/\.(psd|psb)$/i, '').slice(0, 60) || 'Untitled artwork';
+    change(() => {
+      state = {
+        doc: { name, width: Math.round(psd.width * s), height: Math.round(psd.height * s), background: '#ffffff', transparent: true, autoSize: false },
+        layers: made,
+      };
+      if (psd.layers.groups && psd.layers.groups.length) state.groups = psd.layers.groups;
+      sel = [];
+      activeAbId = null;
+    });
+    fitToScreen();
+    render();
+    drawRulers();
+    const notes = [];
+    if (s < 1) notes.push('made smaller to fit');
+    if (psd.skipped) notes.push(psd.skipped + ' empty or adjustment layer' + (psd.skipped > 1 ? 's' : '') + ' left out');
+    if (psd.layers.some((L) => L.clipped)) notes.push('clipping masks are not supported yet');
+    toast('Opened "' + name + '"' + (notes.length ? ' (' + notes.join('; ') + ')' : '') + '.');
+  }
+
+  // Photoshop files open as a new document; everything else goes on as layers.
+  async function takePsdFiles(files) {
+    const rest = [];
+    for (const f of files) {
+      if (/\.(psd|psb)$/i.test(f.name)) await openPsd(f);
+      else rest.push(f);
+    }
+    return rest;
+  }
+  fileInput.accept += ',.psd,.psb';
 
   // ---------- Create artwork ----------
 
