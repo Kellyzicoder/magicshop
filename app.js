@@ -2222,6 +2222,8 @@
       }
     } else if (tool === 'wand') {
       wandOptions(add);
+    } else if (tool === 'quicksel') {
+      quickSelOptions(add);
     } else if (tool === 'marquee') {
       add(seg([{ value: 'rect', label: 'Rectangle' }, { value: 'ellipse', label: 'Ellipse' }], marqKind, (v) => {
         marqKind = v;
@@ -3253,6 +3255,114 @@
     if (!has) add(el('span', 'opt-hint', 'Click a colour on the layer. Hold Shift to add more.'));
   }
 
+  // ---------- Quick Selection ----------
+  // Paint over what you want: the selection grows out from the brush to nearby pixels
+  // of the same colours, and stops at edges. Hold Alt to take areas away.
+  const qsOpts = { size: 30, tolerance: 22 };
+  let qs = null;
+
+  function downQuickSel(e, p) {
+    const l = selected();
+    if (!l || !l.visible) { toast('Click a layer first, then paint over what you want.'); return; }
+    if (l.rotation || l.warp) { toast('Set the rotation back to 0 and reset any bend first.'); return; }
+    const r = rasterize(l);
+    const W = r.canvas.width, H = r.canvas.height;
+    const data = r.canvas.getContext('2d').getImageData(0, 0, W, H).data;
+    const old = marq && marq.pix;
+    const keep = old && old.id === l.id && old.w === W && old.h === H && old.x === l.x && old.y === l.y;
+    qs = {
+      l, r, W, H, data,
+      mask: keep ? old.data.slice() : new Uint8Array(W * H),
+      take: e.altKey,
+      samples: new Map(),
+      last: 0,
+    };
+    startDrag(e, { mode: 'qs' });
+    quickSelAt(p);
+  }
+
+  function quickSelAt(p) {
+    const q = qs;
+    if (!q) return;
+    const { W, H, data, mask, r } = q;
+    const cx = (p.x - q.l.x) * r.sx, cy = (p.y - q.l.y) * r.sy;
+    const rad = Math.max(1, (qsOpts.size / 2) * r.sx);
+    const x0 = Math.max(0, Math.floor(cx - rad)), x1 = Math.min(W - 1, Math.ceil(cx + rad));
+    const y0 = Math.max(0, Math.floor(cy - rad)), y1 = Math.min(H - 1, Math.ceil(cy + rad));
+    if (x0 > x1 || y0 > y1) return;
+    const seeds = [];
+    // the colours under the brush teach the tool what to look for
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        if ((x - cx) ** 2 + (y - cy) ** 2 > rad * rad) continue;
+        const i = y * W + x, k = i * 4;
+        if (q.samples.size < 96 && (x + y) % 3 === 0) {
+          const key = (data[k] >> 3) << 10 | (data[k + 1] >> 3) << 5 | (data[k + 2] >> 3);
+          if (!q.samples.has(key)) q.samples.set(key, [data[k], data[k + 1], data[k + 2], data[k + 3]]);
+        }
+        seeds.push(i);
+      }
+    }
+    const cols = [...q.samples.values()];
+    const lim = qsOpts.tolerance * 2.55;
+    const like = (i) => {
+      const k = i * 4;
+      for (const c of cols) {
+        if (Math.max(Math.abs(data[k] - c[0]), Math.abs(data[k + 1] - c[1]), Math.abs(data[k + 2] - c[2]), Math.abs(data[k + 3] - c[3])) <= lim) return true;
+      }
+      return false;
+    };
+    const want = q.take ? 0 : 1;
+    const stack = [];
+    for (const i of seeds) if (mask[i] !== want) { mask[i] = want; stack.push(i); }
+    const N = W * H;
+    while (stack.length) {
+      const i = stack.pop();
+      const x = i % W;
+      let j;
+      if (x > 0 && mask[j = i - 1] !== want && like(j)) { mask[j] = want; stack.push(j); }
+      if (x < W - 1 && mask[j = i + 1] !== want && like(j)) { mask[j] = want; stack.push(j); }
+      if (i >= W && mask[j = i - W] !== want && like(j)) { mask[j] = want; stack.push(j); }
+      if (i < N - W && mask[j = i + W] !== want && like(j)) { mask[j] = want; stack.push(j); }
+    }
+    const now = performance.now();
+    if (now - q.last > 120) { q.last = now; showQuickSel(); }
+  }
+
+  function showQuickSel() {
+    const q = qs;
+    if (!q) return;
+    if (!q.mask.includes(1)) { marq = null; renderToolOptions(); renderMaskRow(); render(); return; }
+    setWandSelection(q.l, q.r, q.mask, q.W, q.H);
+  }
+
+  function endQuickSel() {
+    showQuickSel();
+    qs = null;
+  }
+
+  function quickSelOptions(add) {
+    const range = (label, key, min, max) => {
+      const w = el('span', 'opt-field');
+      const input = el('input');
+      input.type = 'range'; input.min = String(min); input.max = String(max);
+      input.value = String(qsOpts[key]);
+      const out = el('span', 'opt-hint', String(qsOpts[key]));
+      input.addEventListener('input', () => { qsOpts[key] = Number(input.value); out.textContent = input.value; });
+      w.append(el('span', 'opt-label', label), input, out);
+      add(w);
+    };
+    range('Size', 'size', 2, 300);
+    range('Strength', 'tolerance', 1, 80);
+    add(el('span', 'opt-sep'));
+    const has = !!marq;
+    add(actionButton('Copy to new layer', 'Copy the area to a new layer', !has, () => marqueeOp('copy')));
+    add(actionButton('Cut to new layer', 'Move the area to a new layer', !has, () => marqueeOp('cut')));
+    add(actionButton('Erase', 'Delete the pixels in the area (Delete key)', !has, () => marqueeOp('erase')));
+    add(actionButton('Deselect', 'Remove the area (Ctrl+D)', !has, () => { marq = null; renderToolOptions(); renderMaskRow(); render(); }));
+    if (!has) add(el('span', 'opt-hint', 'Paint over what you want. Hold Alt to take some away.'));
+  }
+
   function downMarquee(e, p) {
     marq = { kind: marqKind, x: p.x, y: p.y, w: 0, h: 0 };
     startDrag(e, { mode: 'marq', start: p });
@@ -3440,6 +3550,7 @@
     }
     else if (tool === 'marquee') downMarquee(e, p);
     else if (tool === 'wand') downWand(e, p);
+    else if (tool === 'quicksel') downQuickSel(e, p);
     else if (tool === 'text') downText(e, p);
     else if (tool === 'shape') downShape(e, p);
     else if (tool === 'pen') downPen(e, p);
@@ -3467,7 +3578,7 @@
         penDraft.cur = p;
         scheduleRender();
       }
-      if (tool === 'brush' || tool === 'eraser') {
+      if (tool === 'brush' || tool === 'eraser' || tool === 'quicksel') {
         hoverPt = p;
         scheduleRender();
       } else if (tool === 'crop' && cropBox) {
@@ -3496,6 +3607,11 @@
       updateBand(p);
     } else if (drag.mode === 'marq') {
       updateMarquee(p, e.shiftKey);
+    } else if (drag.mode === 'qs') {
+      const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
+      if (events.length > 1) for (const ev of events) quickSelAt(toDoc(ev));
+      else quickSelAt(p);
+      hoverPt = p;
     } else if (drag.mode === 'shape') {
       const l = getLayer(drag.id);
       if (l) updateShape(l, p, e.shiftKey);
@@ -3536,6 +3652,7 @@
     if (!drag) return;
     const d = drag;
     drag = null;
+    if (d.mode === 'qs') { endQuickSel(); return; }
 
     if (d.mode === 'move' || d.mode === 'resize' || d.mode === 'rotate') {
       commit(d.before);
@@ -4429,8 +4546,8 @@
 
   function drawPaintOverlays() {
     const s = 1 / viewScale;
-    if (hoverPt && (tool === 'brush' || tool === 'eraser') && !drag) {
-      const r = brushOpts[tool].size / 2;
+    if (hoverPt && (((tool === 'brush' || tool === 'eraser') && !drag) || tool === 'quicksel')) {
+      const r = (tool === 'quicksel' ? qsOpts.size : brushOpts[tool].size) / 2;
       ctx.save();
       ctx.lineWidth = s;
       ctx.beginPath();
@@ -5586,7 +5703,7 @@
       if (tool === 'cutout' && cutout) endCutout(true);
       finishTextEdit();
       if (penDraft) finishPen(false, false);
-      if (name !== 'marquee' && name !== 'wand') marq = null;
+      if (name !== 'marquee' && name !== 'wand' && name !== 'quicksel') marq = null;
       cropBox = null;
       hoverPt = null;
       gradDraft = null;
@@ -5623,6 +5740,7 @@
   // the small corner mark to see the others.
   const TOOL_GROUPS = [
     ['select', 'artboard', 'warp'],
+    ['quicksel', 'wand'],
     ['eraser', 'cutout'],
     ['gradient', 'bucket'],
   ];
@@ -5764,7 +5882,7 @@
   let lastMarq = null;
 
   function useSelectTool() {
-    if (tool !== 'marquee' && tool !== 'wand') {
+    if (tool !== 'marquee' && tool !== 'wand' && tool !== 'quicksel') {
       const keep = marq;
       setTool('marquee');
       marq = keep;
