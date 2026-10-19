@@ -301,6 +301,26 @@
     </form>
   </dialog>
 
+  <dialog id="size-dialog">
+    <form method="dialog" class="new-form size-form">
+      <h3 id="size-title">Canvas size</h3>
+      <p id="size-now" class="font-note"></p>
+      <div class="size-row">
+        <label class="field-row"><span class="field-label">Width (px)</span><input id="size-w" type="number" min="1" max="8000" step="1"></label>
+        <label class="field-row"><span class="field-label">Height (px)</span><input id="size-h" type="number" min="1" max="8000" step="1"></label>
+      </div>
+      <label class="check" id="size-lock-row"><input id="size-lock" type="checkbox" checked> Keep the same shape</label>
+      <div id="size-anchor-row">
+        <span class="field-label">Grow or shrink from</span>
+        <div id="size-anchor" class="anchor-grid" role="radiogroup" aria-label="Anchor"></div>
+      </div>
+      <div class="dialog-actions">
+        <button value="cancel" type="submit" class="btn">Cancel</button>
+        <button value="ok" type="submit" class="btn btn-primary">OK</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog id="fonts-dialog">
     <form method="dialog" class="new-form">
       <h3>Fonts</h3>
