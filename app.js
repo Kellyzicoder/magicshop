@@ -248,6 +248,31 @@
   const getLayer = (id) => state.layers.find((l) => l.id === id) || null;
   const selectedLayers = () => sel.map(getLayer).filter(Boolean);
   const selected = () => (sel.length === 1 ? getLayer(sel[0]) : null);
+
+  // ----- Layer groups (folders in the Layers panel) -----
+  // A layer in a group has l.group = the group's id. A group's layers always sit
+  // next to each other in the stack. state.groups holds each group's name and switches.
+  const groupList = () => state.groups || (state.groups = []);
+  const getGroup = (id) => (state.groups || []).find((g) => g.id === id) || null;
+  const groupMembers = (id) => state.layers.filter((l) => l.group === id);
+  const shown = (l) => l.visible && !(l.group && getGroup(l.group) && getGroup(l.group).visible === false);
+
+  // Keeps each group's layers together, and drops groups that have no layers left.
+  function tidyGroups() {
+    if (!state.groups) return;
+    for (const l of state.layers) if (l.group && !getGroup(l.group)) delete l.group;
+    const out = [];
+    const placed = new Set();
+    for (const l of state.layers) {
+      if (!l.group) { out.push(l); continue; }
+      if (placed.has(l.group)) continue;
+      placed.add(l.group);
+      out.push(...groupMembers(l.group));
+    }
+    state.layers = out;
+    state.groups = state.groups.filter((g) => placed.has(g.id));
+    if (!state.groups.length) delete state.groups;
+  }
   const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
   const srcW = (img) => img.naturalWidth || img.width;
   const srcH = (img) => img.naturalHeight || img.height;
@@ -1261,7 +1286,7 @@
 
   function paintLayers(g, tier, only) {
     for (const layer of state.layers) {
-      if (!layer.visible) continue;
+      if (!shown(layer)) continue;
       if (g === ctx && layer.id === editingId) continue; // its text box is showing instead
       if (only && !only(layer)) continue;
       drawLayer(g, layer, tier, false);
@@ -1285,7 +1310,7 @@
           g.rect(a.x, a.y, a.width, a.height);
           g.clip();
         }
-        if (layer.visible && !(g === ctx && layer.id === editingId)) drawLayer(g, layer, tier, false);
+        if (shown(layer) && !(g === ctx && layer.id === editingId)) drawLayer(g, layer, tier, false);
         g.restore();
       }
       g.globalAlpha = 1;
@@ -1702,10 +1727,34 @@
     }
 
     const top = state.layers.length - 1;
+    const headed = new Set();
     for (let i = top; i >= 0; i--) {
       const l = state.layers[i];
+      const grp = l.group ? getGroup(l.group) : null;
+      if (grp && !headed.has(grp.id)) {
+        headed.add(grp.id);
+        const members = groupMembers(grp.id);
+        const all = members.every((m) => sel.includes(m.id));
+        const gl = el('li', 'layer group-row' + (all ? ' selected' : '') + (grp.visible === false ? ' is-hidden' : ''));
+        gl.dataset.group = grp.id;
+        const geye = makeButton('eye', grp.visible === false ? ICONS.eyeOff : ICONS.eye, grp.visible === false ? 'Show group' : 'Hide group', 'gtoggle');
+        const caret = el('button', 'icon-btn caret' + (grp.open === false ? '' : ' open'));
+        caret.type = 'button';
+        caret.dataset.action = 'gopen';
+        caret.title = grp.open === false ? 'Show the layers inside' : 'Fold the group';
+        caret.innerHTML = '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg>';
+        const folder = el('span', 'thumb type folder');
+        folder.innerHTML = '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5H9l2 2h8.5A1.5 1.5 0 0 1 21 8.5v9A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5z"/></svg>';
+        const gname = el('span', 'name', grp.name);
+        gname.title = grp.name + ' (double-click to rename)';
+        const ug = makeButton('ungroup', '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5H9l2 2h8.5A1.5 1.5 0 0 1 21 8.5v9A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5z"/><path d="M9 13h6"/></svg>', 'Ungroup (keep the layers)', 'ungroup');
+        const gdel = makeButton('delete', ICONS.trash, 'Delete the group and its layers', 'gdelete');
+        gl.append(geye, caret, folder, gname, ug, gdel);
+        layerList.append(gl);
+      }
+      if (grp && grp.open === false) continue;
       const li = document.createElement('li');
-      li.className = 'layer' + (sel.includes(l.id) ? ' selected' : '') + (l.visible ? '' : ' is-hidden');
+      li.className = 'layer' + (sel.includes(l.id) ? ' selected' : '') + (l.visible ? '' : ' is-hidden') + (grp ? ' in-group' : '');
       li.dataset.id = l.id;
 
       const eye = makeButton('eye', l.visible ? ICONS.eye : ICONS.eyeOff, l.visible ? 'Hide layer' : 'Show layer', 'toggle');
@@ -2747,11 +2796,87 @@
 
   function moveLayer(id, direction) {
     change(() => {
-      const i = state.layers.findIndex((l) => l.id === id);
+      const L = state.layers;
+      const i = L.findIndex((l) => l.id === id);
       const j = i + direction;
-      if (i < 0 || j < 0 || j >= state.layers.length) return;
-      [state.layers[i], state.layers[j]] = [state.layers[j], state.layers[i]];
+      if (i < 0) return;
+      const me = L[i];
+      if (j < 0 || j >= L.length) {
+        if (me.group) delete me.group; // pushed past the end of its group: it leaves the group
+        return;
+      }
+      const other = L[j];
+      if (me.group && other.group !== me.group) {
+        delete me.group; // at the edge of its group: step out of it first
+      } else if (!me.group && other.group) {
+        // jump over the whole group
+        const block = groupMembers(other.group).length;
+        L.splice(i, 1);
+        L.splice(direction > 0 ? i + block : i - block, 0, me);
+      } else {
+        [L[i], L[j]] = [L[j], L[i]];
+      }
+      tidyGroups();
     });
+  }
+
+  function groupSelected() {
+    const ids = sel.filter((id) => getLayer(id));
+    if (!ids.length) { toast('Pick the layers to put in a group first.'); return; }
+    finishTextEdit();
+    change(() => {
+      const n = Math.max(0, ...groupList().map((g) => Number(g.id.slice(4)) || 0)) + 1;
+      const g = { id: 'grp-' + n, name: 'Group ' + n, visible: true, open: true };
+      groupList().push(g);
+      // the group goes where the top-most picked layer was
+      const picked = state.layers.filter((l) => ids.includes(l.id));
+      const topIndex = Math.max(...picked.map((l) => state.layers.indexOf(l)));
+      for (const l of picked) l.group = g.id;
+      const rest = state.layers.filter((l) => !ids.includes(l.id));
+      const at = rest.indexOf(state.layers.slice(topIndex + 1).find((l) => !ids.includes(l.id)));
+      if (at < 0) rest.push(...picked);
+      else rest.splice(at, 0, ...picked);
+      state.layers = rest;
+      tidyGroups();
+    });
+  }
+
+  function ungroup(gid) {
+    const id = gid || (selected() && selected().group) || (sel.length && getLayer(sel[0]) && getLayer(sel[0]).group);
+    if (!id) { toast('Pick a group first.'); return; }
+    change(() => {
+      for (const l of groupMembers(id)) delete l.group;
+      state.groups = (state.groups || []).filter((g) => g.id !== id);
+      tidyGroups();
+    });
+  }
+
+  $('lf-group').addEventListener('click', () => groupSelected());
+
+  function renameGroup(gid, row) {
+    const g = getGroup(gid);
+    if (!g) return;
+    const nameEl = row.querySelector('.name');
+    const input = el('input', 'group-name-input');
+    input.type = 'text';
+    input.value = g.name;
+    nameEl.replaceWith(input);
+    input.focus();
+    input.select();
+    let done = false;
+    const finish = (keep) => {
+      if (done) return;
+      done = true;
+      const v = input.value.trim().slice(0, 60);
+      if (keep && v && v !== g.name) change(() => { getGroup(gid).name = v; });
+      else renderPanel();
+    };
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') finish(true);
+      if (e.key === 'Escape') finish(false);
+      e.stopPropagation();
+    });
+    input.addEventListener('blur', () => finish(true));
   }
 
   function deleteLayers(ids) {
@@ -2759,10 +2884,30 @@
     change(() => {
       state.layers = state.layers.filter((l) => !ids.includes(l.id));
       sel = sel.filter((id) => !ids.includes(id));
+      tidyGroups();
     });
   }
 
   layerList.addEventListener('click', (e) => {
+    const grow = e.target.closest('.group-row');
+    if (grow) {
+      const gid = grow.dataset.group;
+      const gb = e.target.closest('button[data-action]');
+      const act = gb ? gb.dataset.action : null;
+      if (act === 'gtoggle') change(() => { const g = getGroup(gid); if (g) g.visible = g.visible === false; });
+      else if (act === 'gopen') { const g = getGroup(gid); if (g) { g.open = g.open === false; renderPanel(); } }
+      else if (act === 'ungroup') ungroup(gid);
+      else if (act === 'gdelete') deleteLayers(groupMembers(gid).map((l) => l.id));
+      else if (e.detail === 2 && e.target.closest('.name')) renameGroup(gid, grow); // double-click the name
+      else if (!e.target.closest('input')) {
+        finishTextEdit();
+        // clicking a group picks all its layers, so they move and change together
+        sel = groupMembers(gid).map((l) => l.id);
+        renderSidePanels();
+        render();
+      }
+      return;
+    }
     const row = e.target.closest('.layer');
     if (!row) return;
     const id = row.dataset.id;
@@ -2972,7 +3117,7 @@
   function hitTest(p, onlyType) {
     for (let i = state.layers.length - 1; i >= 0; i--) {
       const l = state.layers[i];
-      if (!l.visible || (onlyType && l.type !== onlyType)) continue;
+      if (!shown(l) || (onlyType && l.type !== onlyType)) continue;
       if (isMulti()) {
         const a = abOf(l);
         if (a && !inRect(p, a)) continue; // the part cut off by its artboard cannot be clicked
@@ -3130,7 +3275,7 @@
     band = { x: Math.min(s.x, p.x), y: Math.min(s.y, p.y), w: Math.abs(p.x - s.x), h: Math.abs(p.y - s.y) };
     const ids = state.layers
       .filter((l) => {
-        if (!l.visible) return false;
+        if (!shown(l)) return false;
         const b = layerBounds(l);
         return b.x < band.x + band.w && b.x + b.width > band.x && b.y < band.y + band.h && b.y + b.height > band.y;
       })
@@ -4105,6 +4250,7 @@
       x: wr.x, y: wr.y, width: c.width, height: c.height, opacity: 1, visible: true, adjust: defaultAdjust(),
     };
     const at = selected() ? state.layers.indexOf(selected()) + 1 : state.layers.length;
+    if (selected() && selected().group) l.group = selected().group; // new layer joins the picked layer's group
     state.layers.splice(at, 0, l);
     sel = [l.id];
     return l;
@@ -5867,8 +6013,14 @@
     change(() => {
       const i = state.layers.indexOf(l);
       state.layers.splice(i, 1);
-      if (top) state.layers.push(l);
+      if (l.group) {
+        // inside a group: go to the top or bottom of the group
+        const block = state.layers.map((x, k) => (x.group === l.group ? k : -1)).filter((k) => k >= 0);
+        if (!block.length) state.layers.splice(i, 0, l);
+        else state.layers.splice(top ? block[block.length - 1] + 1 : block[0], 0, l);
+      } else if (top) state.layers.push(l);
       else state.layers.unshift(l);
+      tidyGroups();
     });
   }
 
@@ -5923,6 +6075,9 @@
       }, () => hasLayers() || (isMulti() && abSelected)],
       ['Layer via Cut', 'Ctrl+Shift+J', () => marqueeOp('cut'), () => !!(marq && selected())],
       ['Delete Layer', '', () => deleteLayers(sel.slice()), hasLayers],
+      '-',
+      ['Group Layers', 'Ctrl+G', groupSelected, hasLayers],
+      ['Ungroup Layers', 'Ctrl+Shift+G', () => ungroup(), () => sel.some((id) => getLayer(id) && getLayer(id).group)],
       '-',
       ['Mask: Reveal All', '', () => addMask('show'), () => hasLayer() && !hasMask()],
       ['Mask: Hide All', '', () => addMask('hide'), () => hasLayer() && !hasMask()],
