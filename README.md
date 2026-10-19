@@ -17,3 +17,7 @@ node scripts/prepare-app.mjs
 npx @tauri-apps/cli@2 icon app-icon.png
 npx @tauri-apps/cli@2 dev
 ```
+
+## Credits
+
+AI background removal uses [Transformers.js](https://github.com/huggingface/transformers.js) (Apache-2.0) and the [ormbg](https://huggingface.co/onnx-community/ormbg-ONNX) model (Apache-2.0). They are downloaded the first time you use it, then kept by the browser; photos are processed on your own computer.
