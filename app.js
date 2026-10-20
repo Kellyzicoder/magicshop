@@ -4591,7 +4591,96 @@
   // It is not AI: it works best on plain or smooth backgrounds.
 
   let cutout = null; // { id, before, key, prevMask, work, opts }
-  const cutoutOpts = { tolerance: 25, softness: 6, edgesOnly: true, pick: null };
+  const cutoutOpts = { tolerance: 25, softness: 6, edgesOnly: true, pick: null, method: 'colour' };
+
+  // ----- AI background removal -----
+  // Uses a small open model (ormbg, Apache-2.0) run by Transformers.js (Apache-2.0) right
+  // in the browser. The first time, about 44 MB is downloaded; after that the browser keeps
+  // it, and the photo never leaves the computer.
+  const AI_LIB = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.0/dist/transformers.min.js';
+  const AI_MODEL = 'onnx-community/ormbg-ONNX';
+  try { if (localStorage.getItem('magicshop-cutout-method') === 'ai') cutoutOpts.method = 'ai'; } catch { /* no storage */ }
+  let aiSeg = null;     // promise of the loaded model
+  let aiStatus = '';    // what the options bar says while it works
+
+  function setAiStatus(text) {
+    aiStatus = text;
+    const hint = document.querySelector('.ai-status');
+    if (hint) hint.textContent = text;
+  }
+
+  function getSegmenter() {
+    if (!aiSeg) {
+      aiSeg = (async () => {
+        const T = await import(AI_LIB);
+        if (T.env) T.env.allowLocalModels = false;
+        const seen = new Map();
+        return T.pipeline('background-removal', AI_MODEL, {
+          dtype: 'q8',
+          progress_callback: (p) => {
+            if (!p || p.status !== 'progress' || !p.total) return;
+            seen.set(p.file, [p.loaded || 0, p.total]);
+            let got = 0, all = 0;
+            for (const [a, b] of seen.values()) { got += a; all += b; }
+            setAiStatus('Getting the AI model (first time only): ' + Math.floor((100 * got) / all) + '%');
+          },
+        });
+      })().catch((err) => {
+        aiSeg = null;
+        throw err;
+      });
+    }
+    return aiSeg;
+  }
+
+  async function runAiCutout() {
+    const c = cutout;
+    if (!c) return;
+    if (c.ai) { runCutout(); return; }
+    if (c.aiBusy) return;
+    c.aiBusy = true;
+    setAiStatus('Loading the AI…');
+    renderToolOptions();
+    try {
+      const seg = await getSegmenter();
+      setAiStatus('Finding the subject…');
+      const src = document.createElement('canvas');
+      src.width = c.work.width;
+      src.height = c.work.height;
+      src.getContext('2d').putImageData(c.work, 0, 0);
+      const blob = await canvasBlob(src, 'image/png');
+      const url = URL.createObjectURL(blob);
+      let out;
+      try { out = await seg(url); } finally { URL.revokeObjectURL(url); }
+      const im = Array.isArray(out) ? out[0] : out;
+      const w = im.width, h = im.height, ch = im.channels || 4;
+      const m = document.createElement('canvas');
+      m.width = w;
+      m.height = h;
+      const mg = m.getContext('2d');
+      const id = mg.createImageData(w, h);
+      for (let i = 0; i < w * h; i++) {
+        id.data[i * 4] = id.data[i * 4 + 1] = id.data[i * 4 + 2] = 255;
+        id.data[i * 4 + 3] = ch === 1 ? im.data[i] : im.data[i * ch + ch - 1];
+      }
+      mg.putImageData(id, 0, 0);
+      if (cutout !== c) return; // closed while it was working
+      c.ai = m;
+      setAiStatus('');
+      runCutout();
+    } catch (err) {
+      console.warn('AI background removal failed', err);
+      if (cutout === c) {
+        cutoutOpts.method = 'colour';
+        runCutout();
+      }
+      setAiStatus('');
+      toast('The AI could not start (are you online?). Using the colour method instead.');
+    } finally {
+      c.aiBusy = false;
+      if (cutout === c) renderToolOptions();
+    }
+  }
 
   const srgb2lin = (v) => { v /= 255; return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
 
@@ -4731,11 +4820,18 @@
     const l = getLayer(cutout.id);
     if (!l) return;
     const o = cutoutOpts;
-    const result = computeCutout(cutout.work, o);
-    const small = document.createElement('canvas');
-    small.width = result.width;
-    small.height = result.height;
-    small.getContext('2d').putImageData(result, 0, 0);
+    let small;
+    if (o.method === 'ai' && cutout.ai) {
+      small = cutout.ai;
+    } else if (o.method === 'ai') {
+      return; // the AI is still working; keep what is showing
+    } else {
+      const result = computeCutout(cutout.work, o);
+      small = document.createElement('canvas');
+      small.width = result.width;
+      small.height = result.height;
+      small.getContext('2d').putImageData(result, 0, 0);
+    }
     const c = newMaskCanvas(l, false);
     const g = c.getContext('2d');
     g.imageSmoothingQuality = 'high';
@@ -4776,6 +4872,7 @@
     cutoutOpts.pick = null;
     maskEditId = null;
     runCutout();
+    if (cutoutOpts.method === 'ai') runAiCutout();
     return true;
   }
 
@@ -4794,7 +4891,7 @@
   }
 
   function pickCutoutColor(p) {
-    if (!cutout) return;
+    if (!cutout || cutoutOpts.method === 'ai') return;
     const l = getLayer(cutout.id);
     if (!l) return;
     const w = cutout.work;
@@ -4829,6 +4926,22 @@
       w.append(el('span', 'opt-label', label), input, out);
       add(w);
     };
+    add(seg([{ value: 'ai', label: 'AI (photos)' }, { value: 'colour', label: 'By colour' }], cutoutOpts.method, (v) => {
+      cutoutOpts.method = v;
+      try { localStorage.setItem('magicshop-cutout-method', v); } catch { /* private window: just don't remember */ }
+      if (v === 'ai') runAiCutout();
+      else runCutout();
+      renderToolOptions();
+    }));
+    add(el('span', 'opt-sep'));
+    if (cutoutOpts.method === 'ai') {
+      const hint = el('span', 'opt-hint ai-status', aiStatus || (cutout.ai ? 'AI found the subject. Paint on the mask to fix any spots.' : ''));
+      add(hint);
+      add(el('span', 'opt-sep'));
+      add(actionButton('Apply', 'Keep the cut-out (it stays as a mask you can paint on)', !cutout.ai, () => { endCutout(true); setTool('select'); }));
+      add(actionButton('Cancel', 'Go back', false, () => { endCutout(false); setTool('select'); }));
+      return;
+    }
     rangeField('Strength', 'tolerance', 3, 80);
     rangeField('Soft edge', 'softness', 0, 20);
     add(seg([{ value: 'edge', label: 'From the edges' }, { value: 'all', label: 'Everywhere' }], cutoutOpts.edgesOnly ? 'edge' : 'all', (v) => {
