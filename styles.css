@@ -619,6 +619,14 @@ input[type="color"] {
 .layer:hover { background: var(--surface-2); }
 .layer.selected { background: var(--accent-soft); border-color: var(--accent); }
 .layer.is-hidden .thumb, .layer.is-hidden .name { opacity: 0.4; }
+/* layer groups */
+.layer.group-row { gap: 4px; }
+.layer.group-row .caret { width: 20px; }
+.layer.group-row .caret .ic { transition: transform 0.12s; }
+.layer.group-row .caret.open .ic { transform: rotate(90deg); }
+.layer .thumb.folder { display: grid; place-items: center; color: var(--muted); }
+.layer.in-group { margin-left: 22px; }
+.group-name-input { flex: 1; min-width: 0; padding: 3px 6px; }
 
 .layer .thumb {
   flex: none;

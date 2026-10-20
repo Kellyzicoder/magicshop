@@ -248,6 +248,31 @@
   const getLayer = (id) => state.layers.find((l) => l.id === id) || null;
   const selectedLayers = () => sel.map(getLayer).filter(Boolean);
   const selected = () => (sel.length === 1 ? getLayer(sel[0]) : null);
+
+  // ----- Layer groups (folders in the Layers panel) -----
+  // A layer in a group has l.group = the group's id. A group's layers always sit
+  // next to each other in the stack. state.groups holds each group's name and switches.
+  const groupList = () => state.groups || (state.groups = []);
+  const getGroup = (id) => (state.groups || []).find((g) => g.id === id) || null;
+  const groupMembers = (id) => state.layers.filter((l) => l.group === id);
+  const shown = (l) => l.visible && !(l.group && getGroup(l.group) && getGroup(l.group).visible === false);
+
+  // Keeps each group's layers together, and drops groups that have no layers left.
+  function tidyGroups() {
+    if (!state.groups) return;
+    for (const l of state.layers) if (l.group && !getGroup(l.group)) delete l.group;
+    const out = [];
+    const placed = new Set();
+    for (const l of state.layers) {
+      if (!l.group) { out.push(l); continue; }
+      if (placed.has(l.group)) continue;
+      placed.add(l.group);
+      out.push(...groupMembers(l.group));
+    }
+    state.layers = out;
+    state.groups = state.groups.filter((g) => placed.has(g.id));
+    if (!state.groups.length) delete state.groups;
+  }
   const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
   const srcW = (img) => img.naturalWidth || img.width;
   const srcH = (img) => img.naturalHeight || img.height;
@@ -1261,7 +1286,7 @@
 
   function paintLayers(g, tier, only) {
     for (const layer of state.layers) {
-      if (!layer.visible) continue;
+      if (!shown(layer)) continue;
       if (g === ctx && layer.id === editingId) continue; // its text box is showing instead
       if (only && !only(layer)) continue;
       drawLayer(g, layer, tier, false);
@@ -1285,7 +1310,7 @@
           g.rect(a.x, a.y, a.width, a.height);
           g.clip();
         }
-        if (layer.visible && !(g === ctx && layer.id === editingId)) drawLayer(g, layer, tier, false);
+        if (shown(layer) && !(g === ctx && layer.id === editingId)) drawLayer(g, layer, tier, false);
         g.restore();
       }
       g.globalAlpha = 1;
@@ -1702,10 +1727,34 @@
     }
 
     const top = state.layers.length - 1;
+    const headed = new Set();
     for (let i = top; i >= 0; i--) {
       const l = state.layers[i];
+      const grp = l.group ? getGroup(l.group) : null;
+      if (grp && !headed.has(grp.id)) {
+        headed.add(grp.id);
+        const members = groupMembers(grp.id);
+        const all = members.every((m) => sel.includes(m.id));
+        const gl = el('li', 'layer group-row' + (all ? ' selected' : '') + (grp.visible === false ? ' is-hidden' : ''));
+        gl.dataset.group = grp.id;
+        const geye = makeButton('eye', grp.visible === false ? ICONS.eyeOff : ICONS.eye, grp.visible === false ? 'Show group' : 'Hide group', 'gtoggle');
+        const caret = el('button', 'icon-btn caret' + (grp.open === false ? '' : ' open'));
+        caret.type = 'button';
+        caret.dataset.action = 'gopen';
+        caret.title = grp.open === false ? 'Show the layers inside' : 'Fold the group';
+        caret.innerHTML = '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg>';
+        const folder = el('span', 'thumb type folder');
+        folder.innerHTML = '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5H9l2 2h8.5A1.5 1.5 0 0 1 21 8.5v9A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5z"/></svg>';
+        const gname = el('span', 'name', grp.name);
+        gname.title = grp.name + ' (double-click to rename)';
+        const ug = makeButton('ungroup', '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5H9l2 2h8.5A1.5 1.5 0 0 1 21 8.5v9A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5z"/><path d="M9 13h6"/></svg>', 'Ungroup (keep the layers)', 'ungroup');
+        const gdel = makeButton('delete', ICONS.trash, 'Delete the group and its layers', 'gdelete');
+        gl.append(geye, caret, folder, gname, ug, gdel);
+        layerList.append(gl);
+      }
+      if (grp && grp.open === false) continue;
       const li = document.createElement('li');
-      li.className = 'layer' + (sel.includes(l.id) ? ' selected' : '') + (l.visible ? '' : ' is-hidden');
+      li.className = 'layer' + (sel.includes(l.id) ? ' selected' : '') + (l.visible ? '' : ' is-hidden') + (grp ? ' in-group' : '');
       li.dataset.id = l.id;
 
       const eye = makeButton('eye', l.visible ? ICONS.eye : ICONS.eyeOff, l.visible ? 'Hide layer' : 'Show layer', 'toggle');
@@ -2749,11 +2798,87 @@
 
   function moveLayer(id, direction) {
     change(() => {
-      const i = state.layers.findIndex((l) => l.id === id);
+      const L = state.layers;
+      const i = L.findIndex((l) => l.id === id);
       const j = i + direction;
-      if (i < 0 || j < 0 || j >= state.layers.length) return;
-      [state.layers[i], state.layers[j]] = [state.layers[j], state.layers[i]];
+      if (i < 0) return;
+      const me = L[i];
+      if (j < 0 || j >= L.length) {
+        if (me.group) delete me.group; // pushed past the end of its group: it leaves the group
+        return;
+      }
+      const other = L[j];
+      if (me.group && other.group !== me.group) {
+        delete me.group; // at the edge of its group: step out of it first
+      } else if (!me.group && other.group) {
+        // jump over the whole group
+        const block = groupMembers(other.group).length;
+        L.splice(i, 1);
+        L.splice(direction > 0 ? i + block : i - block, 0, me);
+      } else {
+        [L[i], L[j]] = [L[j], L[i]];
+      }
+      tidyGroups();
     });
+  }
+
+  function groupSelected() {
+    const ids = sel.filter((id) => getLayer(id));
+    if (!ids.length) { toast('Pick the layers to put in a group first.'); return; }
+    finishTextEdit();
+    change(() => {
+      const n = Math.max(0, ...groupList().map((g) => Number(g.id.slice(4)) || 0)) + 1;
+      const g = { id: 'grp-' + n, name: 'Group ' + n, visible: true, open: true };
+      groupList().push(g);
+      // the group goes where the top-most picked layer was
+      const picked = state.layers.filter((l) => ids.includes(l.id));
+      const topIndex = Math.max(...picked.map((l) => state.layers.indexOf(l)));
+      for (const l of picked) l.group = g.id;
+      const rest = state.layers.filter((l) => !ids.includes(l.id));
+      const at = rest.indexOf(state.layers.slice(topIndex + 1).find((l) => !ids.includes(l.id)));
+      if (at < 0) rest.push(...picked);
+      else rest.splice(at, 0, ...picked);
+      state.layers = rest;
+      tidyGroups();
+    });
+  }
+
+  function ungroup(gid) {
+    const id = gid || (selected() && selected().group) || (sel.length && getLayer(sel[0]) && getLayer(sel[0]).group);
+    if (!id) { toast('Pick a group first.'); return; }
+    change(() => {
+      for (const l of groupMembers(id)) delete l.group;
+      state.groups = (state.groups || []).filter((g) => g.id !== id);
+      tidyGroups();
+    });
+  }
+
+  $('lf-group').addEventListener('click', () => groupSelected());
+
+  function renameGroup(gid, row) {
+    const g = getGroup(gid);
+    if (!g) return;
+    const nameEl = row.querySelector('.name');
+    const input = el('input', 'group-name-input');
+    input.type = 'text';
+    input.value = g.name;
+    nameEl.replaceWith(input);
+    input.focus();
+    input.select();
+    let done = false;
+    const finish = (keep) => {
+      if (done) return;
+      done = true;
+      const v = input.value.trim().slice(0, 60);
+      if (keep && v && v !== g.name) change(() => { getGroup(gid).name = v; });
+      else renderPanel();
+    };
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') finish(true);
+      if (e.key === 'Escape') finish(false);
+      e.stopPropagation();
+    });
+    input.addEventListener('blur', () => finish(true));
   }
 
   function deleteLayers(ids) {
@@ -2761,10 +2886,30 @@
     change(() => {
       state.layers = state.layers.filter((l) => !ids.includes(l.id));
       sel = sel.filter((id) => !ids.includes(id));
+      tidyGroups();
     });
   }
 
   layerList.addEventListener('click', (e) => {
+    const grow = e.target.closest('.group-row');
+    if (grow) {
+      const gid = grow.dataset.group;
+      const gb = e.target.closest('button[data-action]');
+      const act = gb ? gb.dataset.action : null;
+      if (act === 'gtoggle') change(() => { const g = getGroup(gid); if (g) g.visible = g.visible === false; });
+      else if (act === 'gopen') { const g = getGroup(gid); if (g) { g.open = g.open === false; renderPanel(); } }
+      else if (act === 'ungroup') ungroup(gid);
+      else if (act === 'gdelete') deleteLayers(groupMembers(gid).map((l) => l.id));
+      else if (e.detail === 2 && e.target.closest('.name')) renameGroup(gid, grow); // double-click the name
+      else if (!e.target.closest('input')) {
+        finishTextEdit();
+        // clicking a group picks all its layers, so they move and change together
+        sel = groupMembers(gid).map((l) => l.id);
+        renderSidePanels();
+        render();
+      }
+      return;
+    }
     const row = e.target.closest('.layer');
     if (!row) return;
     const id = row.dataset.id;
@@ -2974,7 +3119,7 @@
   function hitTest(p, onlyType) {
     for (let i = state.layers.length - 1; i >= 0; i--) {
       const l = state.layers[i];
-      if (!l.visible || (onlyType && l.type !== onlyType)) continue;
+      if (!shown(l) || (onlyType && l.type !== onlyType)) continue;
       if (isMulti()) {
         const a = abOf(l);
         if (a && !inRect(p, a)) continue; // the part cut off by its artboard cannot be clicked
@@ -3132,7 +3277,7 @@
     band = { x: Math.min(s.x, p.x), y: Math.min(s.y, p.y), w: Math.abs(p.x - s.x), h: Math.abs(p.y - s.y) };
     const ids = state.layers
       .filter((l) => {
-        if (!l.visible) return false;
+        if (!shown(l)) return false;
         const b = layerBounds(l);
         return b.x < band.x + band.w && b.x + b.width > band.x && b.y < band.y + band.h && b.y + b.height > band.y;
       })
@@ -4222,6 +4367,7 @@
       x: wr.x, y: wr.y, width: c.width, height: c.height, opacity: 1, visible: true, adjust: defaultAdjust(),
     };
     const at = selected() ? state.layers.indexOf(selected()) + 1 : state.layers.length;
+    if (selected() && selected().group) l.group = selected().group; // new layer joins the picked layer's group
     state.layers.splice(at, 0, l);
     sel = [l.id];
     return l;
@@ -5034,6 +5180,7 @@
   }
 
   async function addImageFiles(files) {
+    files = await takePsdFiles(files);
     for (const file of files) {
       if (file.name.toLowerCase().endsWith('.mshop')) {
         await openProject(file);
@@ -5066,6 +5213,388 @@
     workspace.classList.remove('dragging');
     addImageFiles(Array.from(e.dataTransfer.files));
   });
+
+  // ---------- Opening Photoshop files (.psd / .psb) ----------
+  // Reads the layers (pixels, place, name, opacity, hidden or not, blend mode),
+  // layer masks and groups. Text, shapes and smart objects come in as pictures,
+  // because only their pixels can be read without Photoshop.
+  const PSD_BLENDS = {
+    norm: 'normal', mul: 'multiply', scrn: 'screen', over: 'overlay', sLit: 'soft-light', hLit: 'hard-light',
+    dark: 'darken', lite: 'lighten', 'div': 'color-dodge', idiv: 'color-burn', diff: 'difference', smud: 'exclusion',
+    hue: 'hue', sat: 'saturation', colr: 'color', lum: 'luminosity', lddg: 'color-dodge', lbrn: 'color-burn',
+    dkCl: 'darken', lgCl: 'lighten', vLit: 'hard-light', lLit: 'hard-light', pLit: 'hard-light',
+  };
+  // in a .psb file these blocks have 8-byte lengths
+  const PSB_LONG = new Set(['LMsk', 'Lr16', 'Lr32', 'Layr', 'Mt16', 'Mt32', 'Mtrn', 'Alph', 'FMsk', 'lnk2', 'FEid', 'FXid', 'PxSD']);
+
+  async function inflate(bytes) {
+    const ds = new DecompressionStream('deflate');
+    const out = await new Response(new Blob([bytes]).stream().pipeThrough(ds)).arrayBuffer();
+    return new Uint8Array(out);
+  }
+
+  // Turns one channel's stored bytes into one byte per pixel.
+  async function psdChannel(bytes, w, h, depth, big) {
+    const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const comp = v.getUint16(0);
+    const bpp = depth / 8;
+    const rowBytes = w * bpp;
+    let raw;
+    if (comp === 0) {
+      raw = bytes.subarray(2, 2 + rowBytes * h);
+    } else if (comp === 1) {
+      raw = new Uint8Array(rowBytes * h);
+      const cw = big ? 4 : 2;
+      let p = 2 + h * cw;
+      for (let y = 0; y < h; y++) {
+        const len = big ? v.getUint32(2 + y * 4) : v.getUint16(2 + y * 2);
+        const end = p + len;
+        let o = y * rowBytes;
+        const oEnd = o + rowBytes;
+        while (p < end && o < oEnd) {
+          let n = bytes[p++];
+          if (n < 128) {
+            n += 1;
+            raw.set(bytes.subarray(p, p + n), o);
+            p += n;
+            o += n;
+          } else if (n > 128) {
+            n = 257 - n;
+            raw.fill(bytes[p++], o, o + n);
+            o += n;
+          }
+        }
+        p = end;
+      }
+    } else if (comp === 2 || comp === 3) {
+      raw = await inflate(bytes.subarray(2));
+      if (comp === 3) {
+        // "zip with prediction": each value was stored as the change from the one before it
+        if (bpp === 1) {
+          for (let y = 0; y < h; y++) for (let x = 1; x < w; x++) raw[y * w + x] = (raw[y * w + x] + raw[y * w + x - 1]) & 255;
+        } else if (bpp === 2) {
+          for (let y = 0; y < h; y++) {
+            let prev = 0;
+            for (let x = 0; x < w; x++) {
+              const i = (y * w + x) * 2;
+              prev = (prev + ((raw[i] << 8) | raw[i + 1])) & 65535;
+              raw[i] = prev >> 8;
+              raw[i + 1] = prev & 255;
+            }
+          }
+        }
+      }
+    } else {
+      throw new Error('unknown');
+    }
+    if (bpp === 1) return raw;
+    const out = new Uint8Array(w * h);
+    for (let i = 0; i < out.length; i++) out[i] = raw[i * bpp]; // keep the top byte of 16-bit values
+    return out;
+  }
+
+  function psdCanvas(w, h, mode, ch) {
+    const c = document.createElement('canvas');
+    c.width = w;
+    c.height = h;
+    const g = c.getContext('2d');
+    const img = g.createImageData(w, h);
+    const d = img.data;
+    const A = ch.get(-1);
+    for (let i = 0; i < w * h; i++) {
+      let r, gr, b;
+      if (mode === 1 || mode === 8) {
+        r = gr = b = ch.get(0) ? ch.get(0)[i] : 0;
+      } else if (mode === 4) {
+        const k = ch.get(3) ? ch.get(3)[i] : 255;
+        r = ((ch.get(0) ? ch.get(0)[i] : 255) * k) / 255;
+        gr = ((ch.get(1) ? ch.get(1)[i] : 255) * k) / 255;
+        b = ((ch.get(2) ? ch.get(2)[i] : 255) * k) / 255;
+      } else {
+        r = ch.get(0) ? ch.get(0)[i] : 0;
+        gr = ch.get(1) ? ch.get(1)[i] : 0;
+        b = ch.get(2) ? ch.get(2)[i] : 0;
+      }
+      d[i * 4] = r;
+      d[i * 4 + 1] = gr;
+      d[i * 4 + 2] = b;
+      d[i * 4 + 3] = A ? A[i] : 255;
+    }
+    g.putImageData(img, 0, 0);
+    return c;
+  }
+
+  async function readPsd(buf) {
+    const v = new DataView(buf);
+    const u8 = new Uint8Array(buf);
+    const str = (p, n) => String.fromCharCode(...u8.subarray(p, p + n));
+    if (str(0, 4) !== '8BPS') throw new Error('This is not a Photoshop file.');
+    const version = v.getUint16(4);
+    const big = version === 2;
+    const nChan = v.getUint16(12);
+    const height = v.getUint32(14);
+    const width = v.getUint32(18);
+    const depth = v.getUint16(22);
+    const mode = v.getUint16(24);
+    if (depth !== 8 && depth !== 16) throw new Error('Only 8-bit and 16-bit Photoshop files can be opened (this one is ' + depth + '-bit).');
+    if (![1, 3, 4, 8].includes(mode)) throw new Error('Only RGB, CMYK and Grayscale Photoshop files can be opened.');
+    let p = 26;
+    p += 4 + v.getUint32(p); // colour mode data
+    p += 4 + v.getUint32(p); // image resources
+    const len = (q) => (big ? Number(v.getBigUint64(q)) : v.getUint32(q));
+    const lw = big ? 8 : 4;
+    const lmLen = len(p);
+    const lmStart = p + lw;
+    const layers = [];
+    let skipped = 0;
+    if (lmLen > 0) {
+      const liLen = len(lmStart);
+      const parseLayers = async (q) => {
+        const count = Math.abs(v.getInt16(q));
+        q += 2;
+        const recs = [];
+        for (let n = 0; n < count; n++) {
+          const r = { top: v.getInt32(q), left: v.getInt32(q + 4), bottom: v.getInt32(q + 8), right: v.getInt32(q + 12) };
+          const nc = v.getUint16(q + 16);
+          q += 18;
+          r.channels = [];
+          for (let c = 0; c < nc; c++) {
+            r.channels.push({ id: v.getInt16(q), len: len(q + 2) });
+            q += 2 + lw;
+          }
+          r.blend = str(q + 4, 4).trim();
+          r.opacity = u8[q + 8];
+          r.clipping = u8[q + 9];
+          r.hidden = (u8[q + 10] & 2) !== 0;
+          const extraLen = v.getUint32(q + 12);
+          let e = q + 16;
+          const extraEnd = e + extraLen;
+          const mLen = v.getUint32(e);
+          if (mLen >= 20) {
+            r.mask = { top: v.getInt32(e + 4), left: v.getInt32(e + 8), bottom: v.getInt32(e + 12), right: v.getInt32(e + 16),
+              def: u8[e + 20], disabled: (u8[e + 21] & 2) !== 0 };
+          }
+          e += 4 + mLen;
+          e += 4 + v.getUint32(e); // blending ranges
+          const nameLen = u8[e];
+          r.name = new TextDecoder('latin1').decode(u8.subarray(e + 1, e + 1 + nameLen));
+          e += Math.ceil((nameLen + 1) / 4) * 4;
+          while (e + 12 <= extraEnd) {
+            const sig = str(e, 4);
+            if (sig !== '8BIM' && sig !== '8B64') { e++; continue; } // skip padding
+            const key = str(e + 4, 4);
+            const long = big && PSB_LONG.has(key);
+            const bl = long ? Number(v.getBigUint64(e + 8)) : v.getUint32(e + 8);
+            const data = e + 8 + (long ? 8 : 4);
+            if (key === 'luni') {
+              const n2 = v.getUint32(data);
+              let s = '';
+              for (let k = 0; k < n2; k++) s += String.fromCharCode(v.getUint16(data + 4 + k * 2));
+              r.name = s.replace(/\0+$/, '');
+            } else if (key === 'lsct' || key === 'lsdk') {
+              r.section = v.getUint32(data);
+            } else if (key === 'iOpa') {
+              r.fill = u8[data];
+            }
+            e = data + bl;
+          }
+          q = extraEnd;
+          recs.push(r);
+        }
+        // the pixels, layer by layer, channel by channel
+        for (const r of recs) {
+          r.data = new Map();
+          for (const c of r.channels) {
+            const bytes = u8.subarray(q, q + c.len);
+            q += c.len;
+            const isMask = c.id === -2;
+            const w = isMask ? (r.mask ? r.mask.right - r.mask.left : 0) : r.right - r.left;
+            const h = isMask ? (r.mask ? r.mask.bottom - r.mask.top : 0) : r.bottom - r.top;
+            if (w <= 0 || h <= 0 || c.len < 2 || c.id < -2) continue;
+            try {
+              r.data.set(c.id, await psdChannel(bytes, w, h, depth, big));
+            } catch {
+              r.broken = true;
+            }
+          }
+        }
+        // bottom to top; group markers wrap the layers inside them
+        const open = [];
+        let gid = 0;
+        for (const r of recs) {
+          if (r.section === 3) { open.push({ id: 'grp-' + ++gid, members: [] }); continue; }
+          if (r.section === 1 || r.section === 2) {
+            const grp = open.pop();
+            if (!grp) continue;
+            grp.name = r.name;
+            grp.visible = !r.hidden;
+            grp.open = r.section === 1;
+            // groups inside groups become part of the outer one; a hidden inner group hides its layers
+            if (open.length) {
+              for (const m of grp.members) { if (r.hidden) m.visible = false; open[open.length - 1].members.push(m); }
+            } else {
+              for (const m of grp.members) m.group = grp.id;
+              layers.groups = (layers.groups || []).concat({ id: grp.id, name: grp.name, visible: grp.visible, open: grp.open });
+            }
+            continue;
+          }
+          const w = r.right - r.left, h = r.bottom - r.top;
+          if (w <= 0 || h <= 0 || r.broken) { skipped++; continue; }
+          const L = {
+            name: r.name || 'Layer', left: r.left, top: r.top, width: w, height: h,
+            canvas: psdCanvas(w, h, mode, r.data),
+            opacity: (r.opacity / 255) * (r.fill === undefined ? 1 : r.fill / 255),
+            visible: !r.hidden,
+            blend: PSD_BLENDS[r.blend] || 'normal',
+            clipped: r.clipping === 1,
+          };
+          const mk = r.data.get(-2);
+          if (r.mask && mk) {
+            const mc = document.createElement('canvas');
+            mc.width = w;
+            mc.height = h;
+            const mg = mc.getContext('2d');
+            mg.fillStyle = 'rgba(255,255,255,' + r.mask.def / 255 + ')';
+            mg.fillRect(0, 0, w, h);
+            const mw = r.mask.right - r.mask.left, mh = r.mask.bottom - r.mask.top;
+            const tmp = document.createElement('canvas');
+            tmp.width = mw;
+            tmp.height = mh;
+            const tg = tmp.getContext('2d');
+            const id = tg.createImageData(mw, mh);
+            for (let i = 0; i < mw * mh; i++) { id.data[i * 4] = id.data[i * 4 + 1] = id.data[i * 4 + 2] = 255; id.data[i * 4 + 3] = mk[i]; }
+            tg.putImageData(id, 0, 0);
+            mg.clearRect(r.mask.left - r.left, r.mask.top - r.top, mw, mh);
+            mg.drawImage(tmp, r.mask.left - r.left, r.mask.top - r.top);
+            L.mask = { canvas: mc, on: !r.mask.disabled };
+          }
+          if (open.length) open[open.length - 1].members.push(L);
+          layers.push(L);
+        }
+      };
+      if (liLen > 0) {
+        await parseLayers(lmStart + lw);
+      } else {
+        // 16-bit files keep their layers in an "Lr16" block after the global mask info
+        let t = lmStart + lw + liLen;
+        t += 4 + v.getUint32(t);
+        const end = lmStart + lmLen;
+        while (t + 12 <= end) {
+          const sig = str(t, 4);
+          if (sig !== '8BIM' && sig !== '8B64') { t++; continue; }
+          const key = str(t + 4, 4);
+          const long = big && PSB_LONG.has(key);
+          const bl = long ? Number(v.getBigUint64(t + 8)) : v.getUint32(t + 8);
+          const data = t + 8 + (long ? 8 : 4);
+          if (key === 'Lr16') { await parseLayers(data); break; }
+          t = data + bl;
+        }
+      }
+    }
+    if (!layers.length) {
+      // no layers stored: use the flattened picture at the end of the file
+      let q = lmStart + lmLen;
+      const comp = v.getUint16(q);
+      const bpp = depth / 8;
+      const plane = width * height * bpp;
+      const chans = new Map();
+      if (comp === 0) {
+        for (let c = 0; c < nChan; c++) {
+          const part = new Uint8Array(2 + plane);
+          part.set(u8.subarray(q + 2 + c * plane, q + 2 + (c + 1) * plane), 2);
+          chans.set(c === 3 && mode === 3 ? -1 : c, await psdChannel(part, width, height, depth, big));
+        }
+      } else if (comp === 1) {
+        const cw = big ? 4 : 2;
+        const counts = q + 2;
+        let dataP = counts + nChan * height * cw;
+        for (let c = 0; c < nChan; c++) {
+          let total = 0;
+          const rows = [];
+          for (let y = 0; y < height; y++) {
+            const n = big ? v.getUint32(counts + (c * height + y) * 4) : v.getUint16(counts + (c * height + y) * 2);
+            rows.push(n);
+            total += n;
+          }
+          // rebuild one channel in the per-layer layout so the same reader works
+          const part = new Uint8Array(2 + height * cw + total);
+          const pv = new DataView(part.buffer);
+          pv.setUint16(0, 1);
+          rows.forEach((n, y) => (big ? pv.setUint32(2 + y * 4, n) : pv.setUint16(2 + y * 2, n)));
+          part.set(u8.subarray(dataP, dataP + total), 2 + height * cw);
+          dataP += total;
+          chans.set(c === 3 && mode === 3 ? -1 : c, await psdChannel(part, width, height, depth, big));
+        }
+      } else {
+        throw new Error('This Photoshop file is saved in a way MagicShop cannot read yet.');
+      }
+      layers.push({ name: 'Background', left: 0, top: 0, width, height, canvas: psdCanvas(width, height, mode, chans), opacity: 1, visible: true, blend: 'normal' });
+    }
+    return { width, height, layers, skipped };
+  }
+
+  async function openPsd(file) {
+    let psd;
+    try {
+      psd = await readPsd(await file.arrayBuffer());
+    } catch (err) {
+      toast(err && err.message ? err.message : 'Could not open "' + file.name + '".');
+      return;
+    }
+    // MagicShop's biggest side is MAX_DOC; bigger files are scaled down to fit
+    const s = Math.min(1, MAX_DOC / psd.width, MAX_DOC / psd.height);
+    finishTextEdit();
+    if (penDraft) finishPen(false, false);
+    marq = null;
+    maskEditId = null;
+    const made = [];
+    for (const L of psd.layers) {
+      const key = 'img-' + nextImg++;
+      images.set(key, L.canvas);
+      const l = {
+        id: 'layer-' + nextId++, type: 'image', img: key, name: L.name,
+        x: L.left * s, y: L.top * s, width: L.width * s, height: L.height * s,
+        opacity: L.opacity, visible: L.visible, adjust: defaultAdjust(),
+      };
+      if (L.blend !== 'normal') l.blend = L.blend;
+      if (L.group) l.group = L.group;
+      if (L.mask) {
+        const mk = 'img-' + nextImg++;
+        images.set(mk, L.mask.canvas);
+        l.mask = { img: mk, on: L.mask.on };
+      }
+      made.push(l);
+    }
+    const name = file.name.replace(/\.(psd|psb)$/i, '').slice(0, 60) || 'Untitled artwork';
+    change(() => {
+      state = {
+        doc: { name, width: Math.round(psd.width * s), height: Math.round(psd.height * s), background: '#ffffff', transparent: true, autoSize: false },
+        layers: made,
+      };
+      if (psd.layers.groups && psd.layers.groups.length) state.groups = psd.layers.groups;
+      sel = [];
+      activeAbId = null;
+    });
+    fitToScreen();
+    render();
+    drawRulers();
+    const notes = [];
+    if (s < 1) notes.push('made smaller to fit');
+    if (psd.skipped) notes.push(psd.skipped + ' empty or adjustment layer' + (psd.skipped > 1 ? 's' : '') + ' left out');
+    if (psd.layers.some((L) => L.clipped)) notes.push('clipping masks are not supported yet');
+    toast('Opened "' + name + '"' + (notes.length ? ' (' + notes.join('; ') + ')' : '') + '.');
+  }
+
+  // Photoshop files open as a new document; everything else goes on as layers.
+  async function takePsdFiles(files) {
+    const rest = [];
+    for (const f of files) {
+      if (/\.(psd|psb)$/i.test(f.name)) await openPsd(f);
+      else rest.push(f);
+    }
+    return rest;
+  }
+  fileInput.accept += ',.psd,.psb';
 
   // ---------- Create artwork ----------
 
@@ -6285,8 +6814,14 @@
     change(() => {
       const i = state.layers.indexOf(l);
       state.layers.splice(i, 1);
-      if (top) state.layers.push(l);
+      if (l.group) {
+        // inside a group: go to the top or bottom of the group
+        const block = state.layers.map((x, k) => (x.group === l.group ? k : -1)).filter((k) => k >= 0);
+        if (!block.length) state.layers.splice(i, 0, l);
+        else state.layers.splice(top ? block[block.length - 1] + 1 : block[0], 0, l);
+      } else if (top) state.layers.push(l);
       else state.layers.unshift(l);
+      tidyGroups();
     });
   }
 
@@ -6346,6 +6881,9 @@
       }, () => hasLayers() || (isMulti() && abSelected)],
       ['Layer via Cut', 'Ctrl+Shift+J', () => marqueeOp('cut'), () => !!(marq && selected())],
       ['Delete Layer', '', () => deleteLayers(sel.slice()), hasLayers],
+      '-',
+      ['Group Layers', 'Ctrl+G', groupSelected, hasLayers],
+      ['Ungroup Layers', 'Ctrl+Shift+G', () => ungroup(), () => sel.some((id) => getLayer(id) && getLayer(id).group)],
       '-',
       ['Mask: Reveal All', '', () => addMask('show'), () => hasLayer() && !hasMask()],
       ['Mask: Hide All', '', () => addMask('hide'), () => hasLayer() && !hasMask()],
