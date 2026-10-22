@@ -5329,6 +5329,34 @@
     const u8 = new Uint8Array(buf);
     const str = (p, n) => String.fromCharCode(...u8.subarray(p, p + n));
     if (str(0, 4) !== '8BPS') throw new Error('This is not a Photoshop file.');
+    // Photoshop artboards keep their box and background in a small "descriptor"; we only
+    // need a few numbers from it, so look them up by name.
+    const findKey = (from, to, key) => {
+      const k = [...key].map((c) => c.charCodeAt(0));
+      outer: for (let i = from; i <= to - k.length; i++) {
+        for (let j = 0; j < k.length; j++) if (u8[i + j] !== k[j]) continue outer;
+        return i + k.length;
+      }
+      return -1;
+    };
+    const readArtboard = (start, size) => {
+      const end = start + size;
+      const rectAt = Math.max(start, findKey(start, end, 'artboardRect'));
+      const num = (key, from) => {
+        const i = findKey(from, end, key + 'doub');
+        return i < 0 ? null : v.getFloat64(i);
+      };
+      const a = { top: num('Top ', rectAt), left: num('Left', rectAt), bottom: num('Btom', rectAt), right: num('Rght', rectAt) };
+      if ([a.top, a.left, a.bottom, a.right].some((n) => n === null)) return null;
+      const t = findKey(start, end, 'artboardBackgroundType');
+      a.bgType = t >= 0 && str(t, 4) === 'long' ? v.getInt32(t + 4) : 1;
+      const c = findKey(start, end, 'Clr ');
+      if (c >= 0) {
+        const r = num('Rd  ', c), g = num('Grn ', c), b = num('Bl  ', c);
+        if (r !== null && g !== null && b !== null) a.color = [r, g, b].map((n) => Math.round(Math.min(255, Math.max(0, n))));
+      }
+      return a;
+    };
     const version = v.getUint16(4);
     const big = version === 2;
     const nChan = v.getUint16(12);
@@ -5393,6 +5421,8 @@
               r.name = s.replace(/\0+$/, '');
             } else if (key === 'lsct' || key === 'lsdk') {
               r.section = v.getUint32(data);
+            } else if (key === 'artb' || key === 'artd') {
+              r.artb = readArtboard(data, bl);
             } else if (key === 'iOpa') {
               r.fill = u8[data];
             }
@@ -5418,24 +5448,42 @@
             }
           }
         }
+        // first, pair up each group's start and end marker, so we know early which ones are artboards
+        {
+          const st = [];
+          recs.forEach((r, i) => {
+            if (r.section === 3) st.push(i);
+            else if ((r.section === 1 || r.section === 2) && st.length) recs[st.pop()].isArt = !!r.artb;
+          });
+        }
         // bottom to top; group markers wrap the layers inside them
         const open = [];
         let gid = 0;
         for (const r of recs) {
-          if (r.section === 3) { open.push({ id: 'grp-' + ++gid, members: [] }); continue; }
+          if (r.section === 3) { open.push({ id: 'grp-' + ++gid, members: [], art: !!r.isArt }); continue; }
           if (r.section === 1 || r.section === 2) {
             const grp = open.pop();
             if (!grp) continue;
-            grp.name = r.name;
-            grp.visible = !r.hidden;
-            grp.open = r.section === 1;
-            // groups inside groups become part of the outer one; a hidden inner group hides its layers
-            if (open.length) {
-              for (const m of grp.members) { if (r.hidden) m.visible = false; open[open.length - 1].members.push(m); }
+            const hideAll = () => { if (r.hidden) for (const m of grp.members) m.visible = false; };
+            const parent = open.length ? open[open.length - 1] : null;
+            if (r.artb) {
+              hideAll();
+              // an artboard: it becomes a MagicShop artboard, not a group
+              const a = r.artb;
+              const abIndex = (layers.artboards || []).length;
+              for (const m of grp.members) if (m.ab === undefined) m.ab = abIndex;
+              layers.artboards = (layers.artboards || []).concat({
+                name: r.name, left: a.left, top: a.top, width: a.right - a.left, height: a.bottom - a.top,
+                transparent: a.bgType === 3,
+                background: a.bgType === 2 ? '#000000' : a.bgType === 4 && a.color ? '#' + a.color.map((n) => n.toString(16).padStart(2, '0')).join('') : '#ffffff',
+              });
+            } else if (open.some((o) => !o.art)) {
+              hideAll(); // groups inside groups become part of the outer one (MagicShop groups are one level deep)
             } else {
               for (const m of grp.members) m.group = grp.id;
-              layers.groups = (layers.groups || []).concat({ id: grp.id, name: grp.name, visible: grp.visible, open: grp.open });
+              layers.groups = (layers.groups || []).concat({ id: grp.id, name: r.name, visible: !r.hidden, open: r.section === 1 });
             }
+            if (parent) parent.members.push(...grp.members);
             continue;
           }
           const w = r.right - r.left, h = r.bottom - r.top;
@@ -5541,8 +5589,39 @@
       toast(err && err.message ? err.message : 'Could not open "' + file.name + '".');
       return;
     }
+    // Artboards get a margin of pasteboard around them, like MagicShop's own artboard files.
+    const abs = psd.layers.artboards || [];
+    let ox = 0, oy = 0, fullW = psd.width, fullH = psd.height, room = 0;
+    const moved = new Map(); // artboard index -> how far it (and its layers) moved
+    if (abs.length) {
+      const span = (k) => Math.max(...abs.map((a) => a[k === 'x' ? 'left' : 'top'] + a[k === 'x' ? 'width' : 'height'])) - Math.min(...abs.map((a) => a[k === 'x' ? 'left' : 'top']));
+      if (span('x') > MAX_DOC - 2 * AB_MARGIN || span('y') > MAX_DOC - 2 * AB_MARGIN) {
+        // Too wide for one canvas (a long carousel, say): put the artboards in rows instead of
+        // shrinking them, so every artboard keeps its real size.
+        const order = abs.map((a, i) => i).sort((i, j) => abs[i].top - abs[j].top || abs[i].left - abs[j].left);
+        const limit = MAX_DOC - 2 * AB_MARGIN;
+        let x = 0, y = 0, rowH = 0, x0 = abs[order[0]].left, y0 = abs[order[0]].top;
+        for (const i of order) {
+          const a = abs[i];
+          if (x > 0 && x + a.width > limit) { x = 0; y += rowH + AB_GAP + AB_TOP; rowH = 0; }
+          const nx = x0 + x, ny = y0 + y;
+          moved.set(i, [nx - a.left, ny - a.top]);
+          a.left = nx;
+          a.top = ny;
+          x += a.width + AB_GAP;
+          rowH = Math.max(rowH, a.height);
+        }
+      }
+      const minL = Math.min(...abs.map((a) => a.left)), minT = Math.min(...abs.map((a) => a.top));
+      fullW = Math.max(...abs.map((a) => a.left + a.width)) - minL;
+      fullH = Math.max(...abs.map((a) => a.top + a.height)) - minT;
+      ox = -minL;
+      oy = -minT;
+      room = 2 * AB_MARGIN;
+    }
     // MagicShop's biggest side is MAX_DOC; bigger files are scaled down to fit
-    const s = Math.min(1, MAX_DOC / psd.width, MAX_DOC / psd.height);
+    const s = Math.min(1, (MAX_DOC - room) / fullW, (MAX_DOC - room) / fullH);
+    const X = (x) => (x + ox) * s + room / 2, Y = (y) => (y + oy) * s + room / 2;
     finishTextEdit();
     if (penDraft) finishPen(false, false);
     marq = null;
@@ -5553,7 +5632,7 @@
       images.set(key, L.canvas);
       const l = {
         id: 'layer-' + nextId++, type: 'image', img: key, name: L.name,
-        x: L.left * s, y: L.top * s, width: L.width * s, height: L.height * s,
+        x: X(L.left + (moved.get(L.ab) || [0, 0])[0]), y: Y(L.top + (moved.get(L.ab) || [0, 0])[1]), width: L.width * s, height: L.height * s,
         opacity: L.opacity, visible: L.visible, adjust: defaultAdjust(),
       };
       if (L.blend !== 'normal') l.blend = L.blend;
@@ -5572,8 +5651,19 @@
         layers: made,
       };
       if (psd.layers.groups && psd.layers.groups.length) state.groups = psd.layers.groups;
+      if (abs.length) {
+        const sorted = abs.slice().sort((a, b) => a.top - b.top || a.left - b.left);
+        state.artboards = sorted.map((a, i) => ({
+          id: 'ab-' + (i + 1), name: a.name, x: Math.round(X(a.left)), y: Math.round(Y(a.top)),
+          width: Math.max(1, Math.round(a.width * s)), height: Math.max(1, Math.round(a.height * s)),
+          background: a.background, transparent: a.transparent,
+        }));
+        state.doc.multi = true;
+        state.doc.transparent = false;
+        fitPasteboard();
+      }
       sel = [];
-      activeAbId = null;
+      activeAbId = abs.length ? 'ab-1' : null;
     });
     fitToScreen();
     render();
