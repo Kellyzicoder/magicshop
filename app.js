@@ -683,7 +683,119 @@
   }
 
   // Works out how big a text layer is, from its words and style.
+  // ----- Text with several styles -----
+  // l.runs = [{ len, font?, size?, weight?, italic?, color?, underline?, strike? }]. Each run covers
+  // `len` characters (a line break counts as one) and changes only what it lists; the rest comes
+  // from the layer itself. A layer without runs has one style.
+  const RUN_KEYS = ['font', 'size', 'weight', 'italic', 'color', 'underline', 'strike'];
+  const runStyle = (l, run) => {
+    const st = {};
+    for (const k of RUN_KEYS) st[k] = run && run[k] !== undefined ? run[k] : l[k];
+    return st;
+  };
+  const runFont = (st) => (st.italic ? 'italic ' : '') + (st.weight || 400) + ' ' + st.size + 'px ' + st.font;
+
+  // the text cut into lines, and each line into pieces that share one style
+  function textPieces(l) {
+    const text = String(l.text);
+    const runs = l.runs || [];
+    const lines = [];
+    let cur = { pieces: [] };
+    let r = 0, left = runs.length ? runs[0].len : Infinity;
+    let piece = null;
+    for (let i = 0; i < text.length; i++) {
+      while (left <= 0 && r < runs.length - 1) { r++; left = runs[r].len; }
+      const ch = text[i];
+      if (ch === '\n') {
+        lines.push(cur);
+        cur = { pieces: [] };
+        piece = null;
+      } else {
+        if (!piece || piece.run !== r) {
+          piece = { run: r, text: '', st: runStyle(l, runs[r]) };
+          cur.pieces.push(piece);
+        }
+        piece.text += l.caps ? ch.toUpperCase() : ch;
+      }
+      left--;
+    }
+    lines.push(cur);
+    for (const line of lines) {
+      // an empty line still takes the height of the style it is in
+      line.size = Math.max(...line.pieces.map((p) => p.st.size), line.pieces.length ? 0 : runStyle(l, runs[r]).size);
+    }
+    return lines;
+  }
+
+  function fitRichText(l) {
+    const lines = textPieces(l);
+    const spacing = l.letterSpacing || 0;
+    let w = 0, h = 0;
+    for (const line of lines) {
+      let lw = 0;
+      for (const p of line.pieces) {
+        measureCtx.font = runFont(p.st);
+        p.w = lineWidth(measureCtx, p.text, spacing);
+        lw += p.w;
+      }
+      line.w = lw;
+      w = Math.max(w, lw);
+      h += line.size * (l.lineHeight || LINE_HEIGHT);
+    }
+    l.width = Math.max(Math.ceil(w), Math.round(l.size * 0.4));
+    l.height = Math.round(h);
+    return lines;
+  }
+
+  function drawRichText(g, l) {
+    const lines = fitRichText({ ...l });
+    const spacing = l.letterSpacing || 0;
+    g.textBaseline = 'alphabetic';
+    g.textAlign = 'left';
+    let y = l.y;
+    for (const line of lines) {
+      const lh = line.size * (l.lineHeight || LINE_HEIGHT);
+      let x = l.align === 'center' ? l.x + (l.width - line.w) / 2 : l.align === 'right' ? l.x + l.width - line.w : l.x;
+      const base = y + lh / 2 + line.size * 0.35; // all pieces sit on one baseline
+      for (const p of line.pieces) {
+        g.font = runFont(p.st);
+        g.fillStyle = p.st.color;
+        if ('letterSpacing' in g) g.letterSpacing = spacing + 'px';
+        g.fillText(p.text, x, base);
+        if ('letterSpacing' in g) g.letterSpacing = '0px';
+        const thick = Math.max(1, p.st.size / 16);
+        if (p.st.underline) g.fillRect(x, base + p.st.size * 0.12, p.w, thick);
+        if (p.st.strike) g.fillRect(x, base - p.st.size * 0.3, p.w, thick);
+        x += p.w;
+      }
+      y += lh;
+    }
+    g.textBaseline = 'middle';
+  }
+
+  // keeps each run on the right letters after the words are edited
+  function moveRuns(runs, before, after) {
+    if (!runs || !runs.length) return runs;
+    const idx = [];
+    runs.forEach((r, k) => { for (let i = 0; i < r.len; i++) idx.push(k); });
+    while (idx.length < before.length) idx.push(runs.length - 1);
+    let p = 0;
+    while (p < before.length && p < after.length && before[p] === after[p]) p++;
+    let q = 0;
+    while (q < before.length - p && q < after.length - p && before[before.length - 1 - q] === after[after.length - 1 - q]) q++;
+    const added = after.length - p - q;
+    const fill = p > 0 ? idx[p - 1] : idx[p] !== undefined ? idx[p] : 0;
+    const next = idx.slice(0, p).concat(Array(added).fill(fill), idx.slice(before.length - q));
+    const out = [];
+    for (const k of next) {
+      if (out.length && out[out.length - 1].k === k) out[out.length - 1].len++;
+      else out.push({ k, len: 1 });
+    }
+    return out.map((o) => ({ ...runs[o.k], len: o.len }));
+  }
+
   function fitText(l) {
+    if (l.runs && l.runs.length) { fitRichText(l); return; }
     measureCtx.font = fontString(l);
     const lines = textLines(l);
     let w = 0;
@@ -693,6 +805,7 @@
   }
 
   function drawText(g, l) {
+    if (l.runs && l.runs.length) { drawRichText(g, l); return; }
     g.font = fontString(l);
     g.fillStyle = l.color;
     g.textBaseline = 'middle';
@@ -1026,7 +1139,216 @@
   }
 
   // `plain` draws the layer with no opacity and no blend mode (used when copying its pixels).
+  // ---------- Layer effects (like Photoshop's Layer Style) ----------
+  // l.fx = { shadow, glow, stroke, overlay, innerShadow, bevel }, each with on: true/false and
+  // its settings. The layer is drawn once into a spare canvas, the effects are built around it,
+  // and the result is kept until the layer changes, so moving around stays quick.
+  const FX_DEFAULTS = {
+    shadow: { on: false, color: '#000000', opacity: 75, angle: 120, distance: 10, size: 10 },
+    stroke: { on: false, color: '#000000', opacity: 100, size: 3, position: 'outside' },
+    glow: { on: false, color: '#ffffbe', opacity: 75, size: 15 },
+    overlay: { on: false, color: '#ff0000', opacity: 100 },
+    innerShadow: { on: false, color: '#000000', opacity: 75, angle: 120, distance: 5, size: 5 },
+    bevel: { on: false, size: 5, angle: 120, highlight: '#ffffff', shadow: '#000000', opacity: 75 },
+  };
+  const FX_NAMES = { shadow: 'Drop shadow', stroke: 'Stroke', glow: 'Outer glow', overlay: 'Colour overlay', innerShadow: 'Inner shadow', bevel: 'Bevel & emboss' };
+  const fxOf = (l, k) => ({ ...FX_DEFAULTS[k], ...((l.fx && l.fx[k]) || {}) });
+  const hasFx = (l) => !!(l.fx && Object.keys(FX_DEFAULTS).some((k) => l.fx[k] && l.fx[k].on));
+  const fxCache = new Map();
+
+  const fxRgba = (hex, op) => {
+    const n = parseInt(String(hex || '#000000').slice(1), 16);
+    return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + clamp(op, 0, 100) / 100 + ')';
+  };
+  const blankLike = (c) => {
+    const o = document.createElement('canvas');
+    o.width = c.width;
+    o.height = c.height;
+    return o;
+  };
+  // the shape of the layer filled with one colour
+  function fxSilhouette(src, color) {
+    const c = blankLike(src);
+    const g = c.getContext('2d');
+    g.drawImage(src, 0, 0);
+    g.globalCompositeOperation = 'source-in';
+    g.fillStyle = color;
+    g.fillRect(0, 0, c.width, c.height);
+    return c;
+  }
+  // only the soft shadow of a shape, moved by (dx, dy)
+  function fxShadow(src, color, dx, dy, blur) {
+    const c = blankLike(src);
+    const g = c.getContext('2d');
+    const far = src.width + 50;
+    g.shadowColor = color;
+    g.shadowBlur = Math.max(0, blur);
+    g.shadowOffsetX = dx + far;
+    g.shadowOffsetY = dy;
+    g.drawImage(src, -far, 0);
+    return c;
+  }
+  // the shape grown outwards by r pixels
+  function fxGrow(src, r) {
+    const c = blankLike(src);
+    const g = c.getContext('2d');
+    g.drawImage(src, 0, 0);
+    if (r <= 0) return c;
+    for (const rr of [r, (r * 2) / 3, r / 3]) {
+      const n = Math.max(8, Math.min(72, Math.ceil(rr * 2)));
+      for (let k = 0; k < n; k++) {
+        const a = (k / n) * Math.PI * 2;
+        g.drawImage(src, Math.cos(a) * rr, Math.sin(a) * rr);
+      }
+    }
+    return c;
+  }
+  // everything outside the shape
+  function fxInverse(src) {
+    const c = blankLike(src);
+    const g = c.getContext('2d');
+    g.fillStyle = '#000';
+    g.fillRect(0, 0, c.width, c.height);
+    g.globalCompositeOperation = 'destination-out';
+    g.drawImage(src, 0, 0);
+    return c;
+  }
+  // a shadow thrown inside the shape from its edges
+  function fxInnerShadow(src, color, dx, dy, blur) {
+    const c = fxShadow(fxInverse(src), color, dx, dy, blur);
+    const g = c.getContext('2d');
+    g.globalCompositeOperation = 'destination-in';
+    g.drawImage(src, 0, 0);
+    return c;
+  }
+  const lightOffset = (angle, dist) => [-Math.cos((angle * Math.PI) / 180) * dist, Math.sin((angle * Math.PI) / 180) * dist];
+
+  function fxPad(l) {
+    let p = 2;
+    const s = fxOf(l, 'shadow'), gl = fxOf(l, 'glow'), st = fxOf(l, 'stroke');
+    if (s.on) p = Math.max(p, s.distance + s.size * 2);
+    if (gl.on) p = Math.max(p, gl.size * 2);
+    if (st.on && st.position !== 'inside') p = Math.max(p, st.size + 2);
+    return Math.ceil(p) + 2;
+  }
+
+  function renderWithFx(l, tier) {
+    const key = tier + '|' + JSON.stringify(l);
+    const hit = fxCache.get(key);
+    if (hit) return hit;
+    const pad = fxPad(l);
+    const b = layerBounds(l);
+    const x0 = Math.floor(b.x) - pad, y0 = Math.floor(b.y) - pad;
+    const W = Math.ceil(b.width) + pad * 2 + 1, H = Math.ceil(b.height) + pad * 2 + 1;
+    if (W < 1 || H < 1 || W * H > 60e6) return null;
+    const src = document.createElement('canvas');
+    src.width = W;
+    src.height = H;
+    const sg = src.getContext('2d');
+    sg.translate(-x0, -y0);
+    const m = l.mask && l.mask.on !== false ? images.get(l.mask.img) : null;
+    if (m) drawMasked(sg, l, tier, true, m);
+    else drawLayerRaw(sg, l, tier, true);
+
+    const out = blankLike(src);
+    const og = out.getContext('2d');
+    const st = fxOf(l, 'stroke');
+    let ringOut = null, ringIn = null;
+    if (st.on && st.size > 0) {
+      const outer = st.position === 'inside' ? 0 : st.position === 'center' ? st.size / 2 : st.size;
+      const inner = st.position === 'outside' ? 0 : st.position === 'center' ? st.size / 2 : st.size;
+      if (outer > 0) {
+        ringOut = fxSilhouette(fxGrow(src, outer), st.color);
+        const rg = ringOut.getContext('2d');
+        rg.globalCompositeOperation = 'destination-out';
+        rg.drawImage(src, 0, 0);
+      }
+      if (inner > 0) {
+        ringIn = fxSilhouette(src, st.color);
+        const rg = ringIn.getContext('2d');
+        rg.globalCompositeOperation = 'destination-out';
+        rg.drawImage(fxSilhouette(fxInverse(fxGrow(fxInverse(src), inner)), '#000'), 0, 0);
+      }
+    }
+    // the outline everything is measured from: the layer plus an outside stroke
+    let shape = src;
+    if (ringOut) {
+      shape = blankLike(src);
+      const g = shape.getContext('2d');
+      g.drawImage(src, 0, 0);
+      g.drawImage(ringOut, 0, 0);
+    }
+    const sh = fxOf(l, 'shadow');
+    if (sh.on) {
+      const [dx, dy] = lightOffset(sh.angle, sh.distance);
+      og.drawImage(fxShadow(fxSilhouette(shape, '#000'), fxRgba(sh.color, sh.opacity), dx, dy, sh.size), 0, 0);
+    }
+    const gl = fxOf(l, 'glow');
+    if (gl.on) {
+      const c = fxShadow(fxSilhouette(shape, '#000'), fxRgba(gl.color, gl.opacity), 0, 0, gl.size);
+      og.drawImage(c, 0, 0);
+      og.drawImage(c, 0, 0); // twice, so the glow is as strong near the edge as Photoshop's
+    }
+    if (ringOut) {
+      og.globalAlpha = st.opacity / 100;
+      og.drawImage(ringOut, 0, 0);
+      og.globalAlpha = 1;
+    }
+    // the layer itself, with the effects that sit on top of it
+    const body = blankLike(src);
+    const bg = body.getContext('2d');
+    bg.drawImage(src, 0, 0);
+    const ov = fxOf(l, 'overlay');
+    if (ov.on) {
+      bg.globalCompositeOperation = 'source-atop';
+      bg.fillStyle = fxRgba(ov.color, ov.opacity);
+      bg.fillRect(0, 0, W, H);
+      bg.globalCompositeOperation = 'source-over';
+    }
+    const is = fxOf(l, 'innerShadow');
+    if (is.on) {
+      const [dx, dy] = lightOffset(is.angle, is.distance);
+      bg.globalCompositeOperation = 'source-atop';
+      bg.drawImage(fxInnerShadow(src, fxRgba(is.color, is.opacity), dx, dy, is.size), 0, 0);
+      bg.globalCompositeOperation = 'source-over';
+    }
+    const bv = fxOf(l, 'bevel');
+    if (bv.on) {
+      // light edges facing the light, dark edges facing away
+      const d = Math.max(1, bv.size / 2);
+      const [lx, ly] = lightOffset(bv.angle, d);
+      bg.globalCompositeOperation = 'source-atop';
+      bg.drawImage(fxInnerShadow(src, fxRgba(bv.highlight, bv.opacity), -lx, -ly, bv.size), 0, 0);
+      bg.drawImage(fxInnerShadow(src, fxRgba(bv.shadow, bv.opacity), lx, ly, bv.size), 0, 0);
+      bg.globalCompositeOperation = 'source-over';
+    }
+    if (ringIn) {
+      bg.globalCompositeOperation = 'source-atop';
+      bg.globalAlpha = st.opacity / 100;
+      bg.drawImage(ringIn, 0, 0);
+      bg.globalAlpha = 1;
+      bg.globalCompositeOperation = 'source-over';
+    }
+    og.drawImage(body, 0, 0);
+    const res = { canvas: out, x0, y0 };
+    if (fxCache.size > 40) fxCache.delete(fxCache.keys().next().value);
+    fxCache.set(key, res);
+    return res;
+  }
+
+  function drawWithFx(g, l, tier) {
+    const r = renderWithFx(l, tier);
+    if (!r) return false;
+    g.globalAlpha = l.opacity;
+    g.globalCompositeOperation = l.blend && l.blend !== 'normal' ? l.blend : 'source-over';
+    g.drawImage(r.canvas, r.x0, r.y0);
+    g.globalAlpha = 1;
+    g.globalCompositeOperation = 'source-over';
+    return true;
+  }
+
   function drawLayer(g, l, tier, plain) {
+    if (!plain && hasFx(l) && drawWithFx(g, l, tier)) return;
     const m = l.mask && l.mask.on !== false ? images.get(l.mask.img) : null;
     if (m) drawMasked(g, l, tier, plain, m);
     else drawLayerRaw(g, l, tier, plain);
@@ -1767,6 +2089,11 @@
       down.disabled = i === 0;
       const del = makeButton('delete', ICONS.trash, 'Delete layer', 'delete');
 
+      if (hasFx(l)) {
+        const fxTag = el('span', 'fx-tag', 'fx');
+        fxTag.title = 'This layer has effects (see Properties)';
+        name.append(fxTag);
+      }
       if (isMulti()) {
         const a = abOf(l);
         const tag = el('span', 'ab-tag', a ? a.name : 'off page');
@@ -1916,6 +2243,11 @@
       for (const l of targets) {
         const oldName = kind === 'shape' ? typeLabel(l) : null;
         Object.assign(l, props);
+        if (kind === 'text' && l.runs) {
+          // a change for the whole layer replaces the same setting in every part of the text
+          l.runs = l.runs.map((r) => { const o = { ...r }; for (const k of Object.keys(props)) delete o[k]; return o; });
+          if (l.runs.every((r) => Object.keys(r).length === 1)) delete l.runs;
+        }
         if (kind === 'shape' && props.shape === 'line') {
           if (!l.stroke) l.stroke = l.fill || '#111111';
           if (!(l.strokeWidth >= 1)) l.strokeWidth = 4;
@@ -2441,6 +2773,68 @@
     } else {
       for (const [label, control] of styleFields(l.type, true)) designBody.append(propRow(label, control));
     }
+    designBody.append(fxSection(l));
+  }
+
+  // Effects section of the Properties panel
+  function fxSection(l) {
+    const box = el('div', 'fx-box');
+    box.append(el('div', 'fx-title', 'Effects'));
+    const set = (k, patch) => change(() => {
+      l.fx = l.fx || {};
+      l.fx[k] = { ...fxOf(l, k), ...patch };
+    });
+    const num = (k, key, label, min, max) => {
+      const w = el('label', 'fx-field');
+      w.append(el('span', '', label), numberInput(fxOf(l, k)[key], min, max, (v) => set(k, { [key]: v })));
+      return w;
+    };
+    const col = (k, key, label) => {
+      const w = el('label', 'fx-field');
+      const c = el('input');
+      c.type = 'color';
+      c.value = fxOf(l, k)[key];
+      c.addEventListener('change', () => set(k, { [key]: c.value }));
+      w.append(el('span', '', label), c);
+      return w;
+    };
+    for (const k of Object.keys(FX_DEFAULTS)) {
+      const f = fxOf(l, k);
+      const row = el('div', 'fx-row' + (f.on ? ' on' : ''));
+      const head = el('label', 'fx-head');
+      const cb = el('input');
+      cb.type = 'checkbox';
+      cb.checked = f.on;
+      cb.addEventListener('change', () => set(k, { on: cb.checked }));
+      head.append(cb, el('span', '', FX_NAMES[k]));
+      row.append(head);
+      if (f.on) {
+        const p = el('div', 'fx-params');
+        if (k === 'bevel') p.append(col(k, 'highlight', 'Light'), col(k, 'shadow', 'Dark'));
+        else p.append(col(k, 'color', 'Colour'));
+        p.append(num(k, 'opacity', 'Opacity %', 0, 100));
+        if (k === 'stroke') {
+          p.append(num(k, 'size', 'Size', 1, 250));
+          const pos = el('select');
+          for (const [v, t] of [['outside', 'Outside'], ['center', 'Centre'], ['inside', 'Inside']]) {
+            const o = el('option', '', t);
+            o.value = v;
+            o.selected = f.position === v;
+            pos.append(o);
+          }
+          pos.addEventListener('change', () => set(k, { position: pos.value }));
+          const w = el('label', 'fx-field');
+          w.append(el('span', '', 'Position'), pos);
+          p.append(w);
+        }
+        if (k === 'shadow' || k === 'innerShadow') p.append(num(k, 'angle', 'Angle °', -180, 360), num(k, 'distance', 'Distance', 0, 500));
+        if (k === 'bevel') p.append(num(k, 'angle', 'Angle °', -180, 360));
+        if (k === 'shadow' || k === 'innerShadow' || k === 'glow' || k === 'bevel') p.append(num(k, 'size', 'Size', 0, 250));
+        row.append(p);
+      }
+      box.append(row);
+    }
+    return box;
   }
 
   const maskRow = $('mask-row');
@@ -3062,6 +3456,7 @@
     if (!editing) return;
     const l = getLayer(editing.id);
     if (!l) return;
+    if (l.runs) l.runs = moveRuns(l.runs, String(l.text), textEditor.value);
     l.text = textEditor.value;
     l.name = textName(l);
     fitText(l);
@@ -5459,8 +5854,25 @@
     const fc = st.FillColor && st.FillColor.Values;
     const hex = (n) => Math.round(Math.max(0, Math.min(1, n)) * 255).toString(16).padStart(2, '0');
     const scale = Math.sqrt(Math.abs(xx * yy - xy * yx)) || 1;
+    // every style run, so text with some bold or coloured words keeps them
+    const runList = styles.map((s2, k) => {
+      const f = psFont(fonts[s2.Font || 0] && fonts[s2.Font || 0].Name);
+      const c = s2.FillColor && s2.FillColor.Values;
+      return {
+        len: lens[k] || 0,
+        font: f,
+        size: (s2.FontSize || st.FontSize || 12) * scale,
+        weight: s2.FauxBold ? Math.min(900, f.weight + 200) : f.weight, // Photoshop's fake bold is a little heavier, not full bold
+        italic: f.italic || !!s2.FauxItalic,
+        color: c && c.length >= 4 ? '#' + hex(c[1]) + hex(c[2]) + hex(c[3]) : '#000000',
+        underline: !!s2.Underline,
+        strike: !!s2.Strikethrough,
+      };
+    });
     return {
       text,
+      runList,
+      rotation: (Math.atan2(xy, xx) * 180) / Math.PI,
       mixed,
       warped,
       rotated: Math.abs(xy) > 1e-3 || Math.abs(yx) > 1e-3,
@@ -5476,6 +5888,84 @@
       underline: !!st.Underline,
       strike: !!st.Strikethrough,
     };
+  }
+
+  // ----- Photoshop "descriptors" (how layer styles are stored) -----
+  // A descriptor is a list of named values: numbers, colours, true/false, more descriptors...
+  function readDescriptor(u8, v, start) {
+    let p = start;
+    const u32 = () => { const n = v.getUint32(p); p += 4; return n; };
+    const uni = () => { const n = u32(); let s = ''; for (let i = 0; i < n; i++) s += String.fromCharCode(v.getUint16(p + i * 2)); p += n * 2; return s.replace(/\0+$/, ''); };
+    const id = () => { let n = u32(); if (n === 0) n = 4; const s = String.fromCharCode(...u8.subarray(p, p + n)); p += n; return s; };
+    const os = () => { const s = String.fromCharCode(...u8.subarray(p, p + 4)); p += 4; return s; };
+    const desc = () => {
+      uni(); id();
+      const n = u32();
+      const o = {};
+      for (let i = 0; i < n; i++) { const k = id(); o[k] = val(os()); }
+      return o;
+    };
+    const val = (t) => {
+      switch (t) {
+        case 'Objc': case 'GlbO': return desc();
+        case 'VlLs': { const n = u32(); const a = []; for (let i = 0; i < n; i++) a.push(val(os())); return a; }
+        case 'doub': { const d = v.getFloat64(p); p += 8; return d; }
+        case 'UntF': { const unit = os(); const d = v.getFloat64(p); p += 8; return { unit, value: d }; }
+        case 'UnFl': { const unit = os(); const n = u32(); const a = []; for (let i = 0; i < n; i++) { a.push(v.getFloat64(p)); p += 8; } return { unit, value: a[0], values: a }; }
+        case 'TEXT': return uni();
+        case 'enum': { id(); return id(); }
+        case 'long': { const d = v.getInt32(p); p += 4; return d; }
+        case 'comp': { p += 8; return 0; }
+        case 'bool': return !!u8[p++];
+        case 'type': case 'GlbC': { uni(); return id(); }
+        case 'alis': case 'tdta': case 'Pth ': { const n = u32(); const b = u8.subarray(p, p + n); p += n; return b; }
+        case 'obj ': {
+          const n = u32();
+          for (let i = 0; i < n; i++) {
+            const k = os();
+            if (k === 'prop') { uni(); id(); id(); } else if (k === 'Clss') { uni(); id(); } else if (k === 'Enmr') { uni(); id(); id(); id(); }
+            else if (k === 'rele') { uni(); id(); u32(); } else if (k === 'Idnt' || k === 'indx') { u32(); } else if (k === 'name') { uni(); id(); uni(); }
+            else throw new Error('ref ' + k);
+          }
+          return null;
+        }
+        default: throw new Error('descriptor type ' + t);
+      }
+    };
+    return desc();
+  }
+
+  // Photoshop's layer style -> MagicShop effects
+  function readLayerStyle(u8, v, start) {
+    const d = readDescriptor(u8, v, start + 8); // after two version numbers
+    if (d.masterFXSwitch === false) return null;
+    const num = (x, def) => (x && typeof x === 'object' ? x.value : typeof x === 'number' ? x : def);
+    const color = (c) => {
+      if (!c) return '#000000';
+      const h = (n) => Math.round(clamp(n || 0, 0, 255)).toString(16).padStart(2, '0');
+      if ('Rd  ' in c) return '#' + h(c['Rd  ']) + h(c['Grn ']) + h(c['Bl  ']);
+      if ('Gry ' in c) { const g = h(255 - (c['Gry '] * 255) / 100); return '#' + g + g + g; }
+      return '#000000';
+    };
+    const pick = (single, multi) => {
+      const list = d[multi];
+      if (Array.isArray(list) && list.length) return list.find((x) => x && x.enab) || list[0];
+      return d[single];
+    };
+    const fx = {};
+    const ds = pick('DrSh', 'dropShadowMulti');
+    if (ds) fx.shadow = { on: ds.enab !== false, color: color(ds['Clr ']), opacity: num(ds.Opct, 75), angle: num(ds.lagl, 120), distance: num(ds.Dstn, 5), size: num(ds.blur, 5) };
+    const is = pick('IrSh', 'innerShadowMulti');
+    if (is) fx.innerShadow = { on: is.enab !== false, color: color(is['Clr ']), opacity: num(is.Opct, 75), angle: num(is.lagl, 120), distance: num(is.Dstn, 5), size: num(is.blur, 5) };
+    const og = d.OrGl;
+    if (og) fx.glow = { on: og.enab !== false, color: color(og['Clr ']), opacity: num(og.Opct, 75), size: num(og.blur, 10) };
+    const st = pick('FrFX', 'frameFXMulti');
+    if (st) fx.stroke = { on: st.enab !== false, color: color(st['Clr ']), opacity: num(st.Opct, 100), size: num(st['Sz  '], 3), position: st.Styl === 'InsF' ? 'inside' : st.Styl === 'CtrF' ? 'center' : 'outside' };
+    const so = pick('SoFi', 'solidFillMulti');
+    if (so) fx.overlay = { on: so.enab !== false, color: color(so['Clr ']), opacity: num(so.Opct, 100) };
+    const bv = d.ebbl;
+    if (bv) fx.bevel = { on: bv.enab !== false, size: num(bv.blur, 5), angle: num(bv.lagl, 120), highlight: color(bv.hglC), shadow: color(bv.sdwC), opacity: Math.round((num(bv.hglO, 75) + num(bv.sdwO, 75)) / 2) };
+    return Object.keys(fx).some((k) => fx[k].on) ? fx : null;
   }
 
   async function readPsd(buf) {
@@ -5575,6 +6065,8 @@
               r.name = s.replace(/\0+$/, '');
             } else if (key === 'lsct' || key === 'lsdk') {
               r.section = v.getUint32(data);
+            } else if (key === 'lfx2') {
+              try { r.fx = readLayerStyle(u8, v, data); } catch (err) { console.warn('layer style not read', err); r.fx = null; }
             } else if (key === 'TySh') {
               try { r.type = readTypeLayer(u8, v, data, bl); } catch { r.type = null; }
             } else if (key === 'artb' || key === 'artd') {
@@ -5651,8 +6143,9 @@
             visible: !r.hidden,
             blend: PSD_BLENDS[r.blend] || 'normal',
             // editable text when Photoshop's text has one style and no bend or tilt; otherwise the picture
-            type: r.type && r.type.text && !r.type.mixed && !r.type.warped && !r.type.rotated ? r.type : null,
-            typeKept: !!(r.type && r.type.text && (r.type.mixed || r.type.warped || r.type.rotated)),
+            type: r.type && r.type.text && !r.type.warped ? r.type : null,
+            fx: r.fx || null,
+            typeKept: !!(r.type && r.type.text && r.type.warped),
             clipped: r.clipping === 1,
           };
           const mk = r.data.get(-2);
@@ -5740,6 +6233,16 @@
     return { width, height, layers, skipped };
   }
 
+  // effect sizes are in pixels, so they shrink with the picture when a big file is made smaller
+  function scaleFx(fx, s) {
+    const out = {};
+    for (const [k, f] of Object.entries(fx)) {
+      out[k] = { ...f };
+      for (const key of ['size', 'distance']) if (typeof f[key] === 'number') out[k][key] = Math.round(f[key] * s * 10) / 10;
+    }
+    return out;
+  }
+
   async function openPsd(file) {
     let psd;
     try {
@@ -5796,18 +6299,51 @@
           id: 'layer-' + nextId++, type: 'text', name: L.name, text: T.text,
           ...defaults.text,
           font: T.font.family, size: Math.max(1, Math.round(T.size * s * 10) / 10),
-          weight: T.bold ? Math.max(700, T.font.weight) : T.font.weight, italic: T.font.italic || T.italic,
+          weight: T.bold ? Math.min(900, T.font.weight + 200) : T.font.weight, italic: T.font.italic || T.italic,
           color: T.color, align: T.align,
           letterSpacing: Math.round((T.tracking / 1000) * T.size * s * 10) / 10,
           lineHeight: T.leading || defaults.text.lineHeight,
           underline: T.underline, strike: T.strike, caps: T.caps,
           x: 0, y: 0, width: 0, height: 0, opacity: L.opacity, visible: L.visible,
         };
+        if (T.mixed && T.runList.length > 1) {
+          // the style used for the most letters becomes the layer's own; the others become runs
+          const main = T.runList.reduce((a, b) => (b.len > a.len ? b : a));
+          t.font = main.font.family;
+          t.size = Math.max(1, Math.round(main.size * s * 10) / 10);
+          t.weight = main.weight;
+          t.italic = main.italic;
+          t.color = main.color;
+          t.underline = main.underline;
+          t.strike = main.strike;
+          t.runs = T.runList.map((rn) => {
+            const o = { len: rn.len };
+            const sz = Math.max(1, Math.round(rn.size * s * 10) / 10);
+            if (rn.font.family !== t.font) o.font = rn.font.family;
+            if (sz !== t.size) o.size = sz;
+            if (rn.weight !== t.weight) o.weight = rn.weight;
+            if (rn.italic !== t.italic) o.italic = rn.italic;
+            if (rn.color !== t.color) o.color = rn.color;
+            if (rn.underline !== t.underline) o.underline = rn.underline;
+            if (rn.strike !== t.strike) o.strike = rn.strike;
+            if (!rn.font.known && !fontAvailable(rn.font.name)) missingFonts.add(rn.font.name);
+            return o;
+          });
+        }
+        if (Math.abs(T.rotation) > 0.05) t.rotation = Math.round(T.rotation * 100) / 100;
         fitText(t);
         const cx = bx + (L.width * s) / 2, cy = by + (L.height * s) / 2;
-        t.x = Math.round(t.align === 'left' ? bx : t.align === 'right' ? bx + L.width * s - t.width : cx - t.width / 2);
-        t.y = Math.round(cy - t.height / 2);
+        if (t.rotation) {
+          // a turned box spins around its middle, so put its middle where Photoshop's text was
+          t.x = Math.round(cx - t.width / 2);
+          t.y = Math.round(cy - t.height / 2);
+        }
+        if (!t.rotation) {
+          t.x = Math.round(t.align === 'left' ? bx : t.align === 'right' ? bx + L.width * s - t.width : cx - t.width / 2);
+          t.y = Math.round(cy - t.height / 2);
+        }
         if (L.blend !== 'normal') t.blend = L.blend;
+        if (L.fx) t.fx = scaleFx(L.fx, s);
         if (L.group) t.group = L.group;
         const missing = !T.font.known && !fontAvailable(T.font.name);
         if (missing) {
@@ -5833,6 +6369,7 @@
         opacity: L.opacity, visible: L.visible, adjust: defaultAdjust(),
       };
       if (L.blend !== 'normal') l.blend = L.blend;
+      if (L.fx) l.fx = scaleFx(L.fx, s);
       if (L.group) l.group = L.group;
       if (L.mask) {
         const mk = 'img-' + nextImg++;
@@ -5870,7 +6407,7 @@
     if (psd.skipped) notes.push(psd.skipped + ' empty or adjustment layer' + (psd.skipped > 1 ? 's' : '') + ' left out');
     if (psd.layers.some((L) => L.clipped)) notes.push('clipping masks are not supported yet');
     const kept = psd.layers.filter((L) => L.typeKept).length;
-    if (kept) notes.push(kept + ' text layer' + (kept > 1 ? 's' : '') + ' with mixed styles or bending kept as pictures');
+    if (kept) notes.push(kept + ' bent (warped) text layer' + (kept > 1 ? 's' : '') + ' kept as pictures');
     if (missingFonts.size) notes.push('fonts not on this computer: ' + [...missingFonts].join(', ') + '. Add them in the font list; a hidden "original look" picture is kept under each of those texts');
     toast('Opened "' + name + '"' + (notes.length ? ' (' + notes.join('; ') + ')' : '') + '.');
   }
@@ -7174,6 +7711,7 @@
       ['Layer via Cut', 'Ctrl+Shift+J', () => marqueeOp('cut'), () => !!(marq && selected())],
       ['Delete Layer', '', () => deleteLayers(sel.slice()), hasLayers],
       '-',
+      ['Layer Style (Effects)…', '', () => { setTab('design'); const b = document.querySelector('.fx-box'); if (b) b.scrollIntoView({ block: 'start' }); }, hasLayer],
       ['Group Layers', 'Ctrl+G', groupSelected, hasLayers],
       ['Ungroup Layers', 'Ctrl+Shift+G', () => ungroup(), () => sel.some((id) => getLayer(id) && getLayer(id).group)],
       '-',
