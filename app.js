@@ -683,7 +683,119 @@
   }
 
   // Works out how big a text layer is, from its words and style.
+  // ----- Text with several styles -----
+  // l.runs = [{ len, font?, size?, weight?, italic?, color?, underline?, strike? }]. Each run covers
+  // `len` characters (a line break counts as one) and changes only what it lists; the rest comes
+  // from the layer itself. A layer without runs has one style.
+  const RUN_KEYS = ['font', 'size', 'weight', 'italic', 'color', 'underline', 'strike'];
+  const runStyle = (l, run) => {
+    const st = {};
+    for (const k of RUN_KEYS) st[k] = run && run[k] !== undefined ? run[k] : l[k];
+    return st;
+  };
+  const runFont = (st) => (st.italic ? 'italic ' : '') + (st.weight || 400) + ' ' + st.size + 'px ' + st.font;
+
+  // the text cut into lines, and each line into pieces that share one style
+  function textPieces(l) {
+    const text = String(l.text);
+    const runs = l.runs || [];
+    const lines = [];
+    let cur = { pieces: [] };
+    let r = 0, left = runs.length ? runs[0].len : Infinity;
+    let piece = null;
+    for (let i = 0; i < text.length; i++) {
+      while (left <= 0 && r < runs.length - 1) { r++; left = runs[r].len; }
+      const ch = text[i];
+      if (ch === '\n') {
+        lines.push(cur);
+        cur = { pieces: [] };
+        piece = null;
+      } else {
+        if (!piece || piece.run !== r) {
+          piece = { run: r, text: '', st: runStyle(l, runs[r]) };
+          cur.pieces.push(piece);
+        }
+        piece.text += l.caps ? ch.toUpperCase() : ch;
+      }
+      left--;
+    }
+    lines.push(cur);
+    for (const line of lines) {
+      // an empty line still takes the height of the style it is in
+      line.size = Math.max(...line.pieces.map((p) => p.st.size), line.pieces.length ? 0 : runStyle(l, runs[r]).size);
+    }
+    return lines;
+  }
+
+  function fitRichText(l) {
+    const lines = textPieces(l);
+    const spacing = l.letterSpacing || 0;
+    let w = 0, h = 0;
+    for (const line of lines) {
+      let lw = 0;
+      for (const p of line.pieces) {
+        measureCtx.font = runFont(p.st);
+        p.w = lineWidth(measureCtx, p.text, spacing);
+        lw += p.w;
+      }
+      line.w = lw;
+      w = Math.max(w, lw);
+      h += line.size * (l.lineHeight || LINE_HEIGHT);
+    }
+    l.width = Math.max(Math.ceil(w), Math.round(l.size * 0.4));
+    l.height = Math.round(h);
+    return lines;
+  }
+
+  function drawRichText(g, l) {
+    const lines = fitRichText({ ...l });
+    const spacing = l.letterSpacing || 0;
+    g.textBaseline = 'alphabetic';
+    g.textAlign = 'left';
+    let y = l.y;
+    for (const line of lines) {
+      const lh = line.size * (l.lineHeight || LINE_HEIGHT);
+      let x = l.align === 'center' ? l.x + (l.width - line.w) / 2 : l.align === 'right' ? l.x + l.width - line.w : l.x;
+      const base = y + lh / 2 + line.size * 0.35; // all pieces sit on one baseline
+      for (const p of line.pieces) {
+        g.font = runFont(p.st);
+        g.fillStyle = p.st.color;
+        if ('letterSpacing' in g) g.letterSpacing = spacing + 'px';
+        g.fillText(p.text, x, base);
+        if ('letterSpacing' in g) g.letterSpacing = '0px';
+        const thick = Math.max(1, p.st.size / 16);
+        if (p.st.underline) g.fillRect(x, base + p.st.size * 0.12, p.w, thick);
+        if (p.st.strike) g.fillRect(x, base - p.st.size * 0.3, p.w, thick);
+        x += p.w;
+      }
+      y += lh;
+    }
+    g.textBaseline = 'middle';
+  }
+
+  // keeps each run on the right letters after the words are edited
+  function moveRuns(runs, before, after) {
+    if (!runs || !runs.length) return runs;
+    const idx = [];
+    runs.forEach((r, k) => { for (let i = 0; i < r.len; i++) idx.push(k); });
+    while (idx.length < before.length) idx.push(runs.length - 1);
+    let p = 0;
+    while (p < before.length && p < after.length && before[p] === after[p]) p++;
+    let q = 0;
+    while (q < before.length - p && q < after.length - p && before[before.length - 1 - q] === after[after.length - 1 - q]) q++;
+    const added = after.length - p - q;
+    const fill = p > 0 ? idx[p - 1] : idx[p] !== undefined ? idx[p] : 0;
+    const next = idx.slice(0, p).concat(Array(added).fill(fill), idx.slice(before.length - q));
+    const out = [];
+    for (const k of next) {
+      if (out.length && out[out.length - 1].k === k) out[out.length - 1].len++;
+      else out.push({ k, len: 1 });
+    }
+    return out.map((o) => ({ ...runs[o.k], len: o.len }));
+  }
+
   function fitText(l) {
+    if (l.runs && l.runs.length) { fitRichText(l); return; }
     measureCtx.font = fontString(l);
     const lines = textLines(l);
     let w = 0;
@@ -693,6 +805,7 @@
   }
 
   function drawText(g, l) {
+    if (l.runs && l.runs.length) { drawRichText(g, l); return; }
     g.font = fontString(l);
     g.fillStyle = l.color;
     g.textBaseline = 'middle';
@@ -2130,6 +2243,11 @@
       for (const l of targets) {
         const oldName = kind === 'shape' ? typeLabel(l) : null;
         Object.assign(l, props);
+        if (kind === 'text' && l.runs) {
+          // a change for the whole layer replaces the same setting in every part of the text
+          l.runs = l.runs.map((r) => { const o = { ...r }; for (const k of Object.keys(props)) delete o[k]; return o; });
+          if (l.runs.every((r) => Object.keys(r).length === 1)) delete l.runs;
+        }
         if (kind === 'shape' && props.shape === 'line') {
           if (!l.stroke) l.stroke = l.fill || '#111111';
           if (!(l.strokeWidth >= 1)) l.strokeWidth = 4;
@@ -3338,6 +3456,7 @@
     if (!editing) return;
     const l = getLayer(editing.id);
     if (!l) return;
+    if (l.runs) l.runs = moveRuns(l.runs, String(l.text), textEditor.value);
     l.text = textEditor.value;
     l.name = textName(l);
     fitText(l);
@@ -5735,8 +5854,25 @@
     const fc = st.FillColor && st.FillColor.Values;
     const hex = (n) => Math.round(Math.max(0, Math.min(1, n)) * 255).toString(16).padStart(2, '0');
     const scale = Math.sqrt(Math.abs(xx * yy - xy * yx)) || 1;
+    // every style run, so text with some bold or coloured words keeps them
+    const runList = styles.map((s2, k) => {
+      const f = psFont(fonts[s2.Font || 0] && fonts[s2.Font || 0].Name);
+      const c = s2.FillColor && s2.FillColor.Values;
+      return {
+        len: lens[k] || 0,
+        font: f,
+        size: (s2.FontSize || st.FontSize || 12) * scale,
+        weight: s2.FauxBold ? Math.min(900, f.weight + 200) : f.weight, // Photoshop's fake bold is a little heavier, not full bold
+        italic: f.italic || !!s2.FauxItalic,
+        color: c && c.length >= 4 ? '#' + hex(c[1]) + hex(c[2]) + hex(c[3]) : '#000000',
+        underline: !!s2.Underline,
+        strike: !!s2.Strikethrough,
+      };
+    });
     return {
       text,
+      runList,
+      rotation: (Math.atan2(xy, xx) * 180) / Math.PI,
       mixed,
       warped,
       rotated: Math.abs(xy) > 1e-3 || Math.abs(yx) > 1e-3,
@@ -6007,9 +6143,9 @@
             visible: !r.hidden,
             blend: PSD_BLENDS[r.blend] || 'normal',
             // editable text when Photoshop's text has one style and no bend or tilt; otherwise the picture
-            type: r.type && r.type.text && !r.type.mixed && !r.type.warped && !r.type.rotated ? r.type : null,
+            type: r.type && r.type.text && !r.type.warped ? r.type : null,
             fx: r.fx || null,
-            typeKept: !!(r.type && r.type.text && (r.type.mixed || r.type.warped || r.type.rotated)),
+            typeKept: !!(r.type && r.type.text && r.type.warped),
             clipped: r.clipping === 1,
           };
           const mk = r.data.get(-2);
@@ -6163,17 +6299,49 @@
           id: 'layer-' + nextId++, type: 'text', name: L.name, text: T.text,
           ...defaults.text,
           font: T.font.family, size: Math.max(1, Math.round(T.size * s * 10) / 10),
-          weight: T.bold ? Math.max(700, T.font.weight) : T.font.weight, italic: T.font.italic || T.italic,
+          weight: T.bold ? Math.min(900, T.font.weight + 200) : T.font.weight, italic: T.font.italic || T.italic,
           color: T.color, align: T.align,
           letterSpacing: Math.round((T.tracking / 1000) * T.size * s * 10) / 10,
           lineHeight: T.leading || defaults.text.lineHeight,
           underline: T.underline, strike: T.strike, caps: T.caps,
           x: 0, y: 0, width: 0, height: 0, opacity: L.opacity, visible: L.visible,
         };
+        if (T.mixed && T.runList.length > 1) {
+          // the style used for the most letters becomes the layer's own; the others become runs
+          const main = T.runList.reduce((a, b) => (b.len > a.len ? b : a));
+          t.font = main.font.family;
+          t.size = Math.max(1, Math.round(main.size * s * 10) / 10);
+          t.weight = main.weight;
+          t.italic = main.italic;
+          t.color = main.color;
+          t.underline = main.underline;
+          t.strike = main.strike;
+          t.runs = T.runList.map((rn) => {
+            const o = { len: rn.len };
+            const sz = Math.max(1, Math.round(rn.size * s * 10) / 10);
+            if (rn.font.family !== t.font) o.font = rn.font.family;
+            if (sz !== t.size) o.size = sz;
+            if (rn.weight !== t.weight) o.weight = rn.weight;
+            if (rn.italic !== t.italic) o.italic = rn.italic;
+            if (rn.color !== t.color) o.color = rn.color;
+            if (rn.underline !== t.underline) o.underline = rn.underline;
+            if (rn.strike !== t.strike) o.strike = rn.strike;
+            if (!rn.font.known && !fontAvailable(rn.font.name)) missingFonts.add(rn.font.name);
+            return o;
+          });
+        }
+        if (Math.abs(T.rotation) > 0.05) t.rotation = Math.round(T.rotation * 100) / 100;
         fitText(t);
         const cx = bx + (L.width * s) / 2, cy = by + (L.height * s) / 2;
-        t.x = Math.round(t.align === 'left' ? bx : t.align === 'right' ? bx + L.width * s - t.width : cx - t.width / 2);
-        t.y = Math.round(cy - t.height / 2);
+        if (t.rotation) {
+          // a turned box spins around its middle, so put its middle where Photoshop's text was
+          t.x = Math.round(cx - t.width / 2);
+          t.y = Math.round(cy - t.height / 2);
+        }
+        if (!t.rotation) {
+          t.x = Math.round(t.align === 'left' ? bx : t.align === 'right' ? bx + L.width * s - t.width : cx - t.width / 2);
+          t.y = Math.round(cy - t.height / 2);
+        }
         if (L.blend !== 'normal') t.blend = L.blend;
         if (L.fx) t.fx = scaleFx(L.fx, s);
         if (L.group) t.group = L.group;
@@ -6239,7 +6407,7 @@
     if (psd.skipped) notes.push(psd.skipped + ' empty or adjustment layer' + (psd.skipped > 1 ? 's' : '') + ' left out');
     if (psd.layers.some((L) => L.clipped)) notes.push('clipping masks are not supported yet');
     const kept = psd.layers.filter((L) => L.typeKept).length;
-    if (kept) notes.push(kept + ' text layer' + (kept > 1 ? 's' : '') + ' with mixed styles or bending kept as pictures');
+    if (kept) notes.push(kept + ' bent (warped) text layer' + (kept > 1 ? 's' : '') + ' kept as pictures');
     if (missingFonts.size) notes.push('fonts not on this computer: ' + [...missingFonts].join(', ') + '. Add them in the font list; a hidden "original look" picture is kept under each of those texts');
     toast('Opened "' + name + '"' + (notes.length ? ' (' + notes.join('; ') + ')' : '') + '.');
   }
