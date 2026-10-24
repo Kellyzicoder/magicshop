@@ -5324,6 +5324,160 @@
     return c;
   }
 
+  // ----- Photoshop text layers -----
+  // Photoshop keeps a text layer's words and styles in "EngineData", a small text format
+  // like << /Key value >>. We read the words, font, size, colour and alignment from it,
+  // so the layer comes in as real, editable text.
+  function parseEngineData(b) {
+    let i = 0;
+    const ws = () => { while (i < b.length && (b[i] <= 32)) i++; };
+    const delim = (c) => c <= 32 || c === 0x2f || c === 0x5b || c === 0x5d || c === 0x3c || c === 0x3e || c === 0x28 || c === 0x29;
+    const value = () => {
+      ws();
+      const c = b[i];
+      if (c === 0x3c && b[i + 1] === 0x3c) { // <<
+        i += 2;
+        const o = {};
+        for (;;) {
+          ws();
+          if (i >= b.length) return o;
+          if (b[i] === 0x3e && b[i + 1] === 0x3e) { i += 2; return o; }
+          if (b[i] !== 0x2f) { i++; continue; }
+          i++;
+          let k = '';
+          while (i < b.length && !delim(b[i])) k += String.fromCharCode(b[i++]);
+          o[k] = value();
+        }
+      }
+      if (c === 0x5b) { // [
+        i++;
+        const a = [];
+        for (;;) {
+          ws();
+          if (i >= b.length || b[i] === 0x5d) { i++; return a; }
+          a.push(value());
+        }
+      }
+      if (c === 0x28) { // (string)
+        i++;
+        const bytes = [];
+        while (i < b.length && b[i] !== 0x29) {
+          if (b[i] === 0x5c) i++; // \ escapes the next byte
+          bytes.push(b[i++]);
+        }
+        i++;
+        if (bytes[0] === 0xfe && bytes[1] === 0xff) {
+          let s = '';
+          for (let k = 2; k + 1 < bytes.length; k += 2) s += String.fromCharCode((bytes[k] << 8) | bytes[k + 1]);
+          return s;
+        }
+        return String.fromCharCode(...bytes);
+      }
+      if (c === 0x2f) { // /Name as a value
+        i++;
+        let k = '';
+        while (i < b.length && !delim(b[i])) k += String.fromCharCode(b[i++]);
+        return k;
+      }
+      let t = '';
+      while (i < b.length && !delim(b[i])) t += String.fromCharCode(b[i++]);
+      if (!t) { i++; return null; }
+      if (t === 'true') return true;
+      if (t === 'false') return false;
+      const n = Number(t);
+      return Number.isNaN(n) ? t : n;
+    };
+    return value();
+  }
+
+  // "Montserrat-SemiBoldItalic" -> { family: 'Montserrat', weight: 600, italic: true }
+  const PS_WEIGHTS = [['extralight', 200], ['ultralight', 200], ['semibold', 600], ['demibold', 600], ['extrabold', 800], ['ultrabold', 800],
+    ['thin', 100], ['hairline', 100], ['light', 300], ['regular', 400], ['book', 400], ['normal', 400], ['roman', 400], ['medium', 500],
+    ['bold', 700], ['heavy', 900], ['black', 900]];
+  function psFont(psName) {
+    let [base, style = ''] = String(psName || '').split('-');
+    if (!style) {
+      // names like "BriyoneRegular" or "Poppins Bold" have the style stuck on the end
+      const m = base.match(/^(.*?)[ _]?(ExtraLight|UltraLight|SemiBold|DemiBold|ExtraBold|UltraBold|Thin|Hairline|Light|Regular|Book|Normal|Roman|Medium|Bold|Heavy|Black|Italic)((?:Italic)?)$/);
+      if (m && m[1]) { base = m[1]; style = m[2] + m[3]; }
+    }
+    let st = style.toLowerCase();
+    const italic = /italic|oblique/.test(st);
+    st = st.replace(/italic|oblique/, '');
+    let weight = 400;
+    for (const [w, n] of PS_WEIGHTS) if (st === w || st.startsWith(w)) { weight = n; break; }
+    const spaced = base.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/(MT|PS|Std|Pro)+$/, '').trim();
+    const key = (t) => t.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const known = FONTS.find((f) => key(f.name) === key(base) || key(f.name) === key(spaced));
+    return { family: known ? known.family : '"' + spaced + '", sans-serif', name: known ? known.name : spaced, weight, italic, known: !!known };
+  }
+
+  // true when the browser really has this font (not just the fallback)
+  function fontAvailable(name) {
+    const c = measureCtx;
+    const probe = 'mmmmmmmmmmlliWWQ@#0123';
+    for (const fb of ['monospace', 'serif']) {
+      c.font = '40px ' + fb;
+      const a = c.measureText(probe).width;
+      c.font = '40px "' + name + '", ' + fb;
+      if (c.measureText(probe).width !== a) return true;
+    }
+    return false;
+  }
+
+  function readTypeLayer(u8, v, start, size) {
+    const end = start + size;
+    const find = (key, from = start, to = end) => {
+      const k = [...key].map((c) => c.charCodeAt(0));
+      outer: for (let i = from; i <= to - k.length; i++) {
+        for (let j = 0; j < k.length; j++) if (u8[i + j] !== k[j]) continue outer;
+        return i + k.length;
+      }
+      return -1;
+    };
+    const xx = v.getFloat64(start + 2), xy = v.getFloat64(start + 10), yx = v.getFloat64(start + 18), yy = v.getFloat64(start + 26);
+    const ed = find('EngineDatatdta');
+    if (ed < 0) return null;
+    const len = v.getUint32(ed);
+    const eng = parseEngineData(u8.subarray(ed + 4, ed + 4 + len));
+    const ws = find('warpStyle');
+    const warped = ws >= 0 && find('warpNone', ws, Math.min(end, ws + 40)) < 0;
+    const root = eng && eng.EngineDict;
+    if (!root) return null;
+    const text = String((root.Editor && root.Editor.Text) || '').replace(/\r$/, '').replace(/\r/g, '\n').replace(/\u0003/g, '\n');
+    const runs = (root.StyleRun && root.StyleRun.RunArray) || [];
+    const fonts = (eng.ResourceDict && eng.ResourceDict.FontSet) || (eng.DocumentResources && eng.DocumentResources.FontSet) || [];
+    const styles = runs.map((r) => (r.StyleSheet && r.StyleSheet.StyleSheetData) || {});
+    const sig = (s) => [s.Font, s.FontSize, JSON.stringify((s.FillColor && s.FillColor.Values) || null), s.FauxBold, s.FauxItalic].join('|');
+    const lens = (root.StyleRun && root.StyleRun.RunLengthArray) || [];
+    // runs that only cover the line ending don't count
+    const real = styles.filter((s, k) => !(lens[k] <= 1 && k === styles.length - 1 && styles.length > 1));
+    const mixed = new Set(real.map(sig)).size > 1;
+    const st = styles[0] || {};
+    const para = root.ParagraphRun && root.ParagraphRun.RunArray && root.ParagraphRun.RunArray[0];
+    const props = (para && para.ParagraphSheet && para.ParagraphSheet.Properties) || {};
+    const fc = st.FillColor && st.FillColor.Values;
+    const hex = (n) => Math.round(Math.max(0, Math.min(1, n)) * 255).toString(16).padStart(2, '0');
+    const scale = Math.sqrt(Math.abs(xx * yy - xy * yx)) || 1;
+    return {
+      text,
+      mixed,
+      warped,
+      rotated: Math.abs(xy) > 1e-3 || Math.abs(yx) > 1e-3,
+      font: psFont(fonts[st.Font || 0] && fonts[st.Font || 0].Name),
+      size: (st.FontSize || 12) * scale,
+      color: fc && fc.length >= 4 ? '#' + hex(fc[1]) + hex(fc[2]) + hex(fc[3]) : '#000000',
+      align: props.Justification === 1 ? 'right' : props.Justification === 2 ? 'center' : 'left',
+      tracking: st.Tracking || 0,
+      leading: st.AutoLeading === false && st.Leading ? st.Leading / (st.FontSize || 1) : null,
+      caps: st.FontCaps === 2,
+      bold: !!st.FauxBold,
+      italic: !!st.FauxItalic,
+      underline: !!st.Underline,
+      strike: !!st.Strikethrough,
+    };
+  }
+
   async function readPsd(buf) {
     const v = new DataView(buf);
     const u8 = new Uint8Array(buf);
@@ -5421,6 +5575,8 @@
               r.name = s.replace(/\0+$/, '');
             } else if (key === 'lsct' || key === 'lsdk') {
               r.section = v.getUint32(data);
+            } else if (key === 'TySh') {
+              try { r.type = readTypeLayer(u8, v, data, bl); } catch { r.type = null; }
             } else if (key === 'artb' || key === 'artd') {
               r.artb = readArtboard(data, bl);
             } else if (key === 'iOpa') {
@@ -5494,6 +5650,9 @@
             opacity: (r.opacity / 255) * (r.fill === undefined ? 1 : r.fill / 255),
             visible: !r.hidden,
             blend: PSD_BLENDS[r.blend] || 'normal',
+            // editable text when Photoshop's text has one style and no bend or tilt; otherwise the picture
+            type: r.type && r.type.text && !r.type.mixed && !r.type.warped && !r.type.rotated ? r.type : null,
+            typeKept: !!(r.type && r.type.text && (r.type.mixed || r.type.warped || r.type.rotated)),
             clipped: r.clipping === 1,
           };
           const mk = r.data.get(-2);
@@ -5627,12 +5786,50 @@
     marq = null;
     maskEditId = null;
     const made = [];
+    const missingFonts = new Set();
     for (const L of psd.layers) {
+      const bx = X(L.left + (moved.get(L.ab) || [0, 0])[0]), by = Y(L.top + (moved.get(L.ab) || [0, 0])[1]);
+      if (L.type && !L.mask) {
+        // real text: same words, font, size, colour and alignment, placed where Photoshop drew it
+        const T = L.type;
+        const t = {
+          id: 'layer-' + nextId++, type: 'text', name: L.name, text: T.text,
+          ...defaults.text,
+          font: T.font.family, size: Math.max(1, Math.round(T.size * s * 10) / 10),
+          weight: T.bold ? Math.max(700, T.font.weight) : T.font.weight, italic: T.font.italic || T.italic,
+          color: T.color, align: T.align,
+          letterSpacing: Math.round((T.tracking / 1000) * T.size * s * 10) / 10,
+          lineHeight: T.leading || defaults.text.lineHeight,
+          underline: T.underline, strike: T.strike, caps: T.caps,
+          x: 0, y: 0, width: 0, height: 0, opacity: L.opacity, visible: L.visible,
+        };
+        fitText(t);
+        const cx = bx + (L.width * s) / 2, cy = by + (L.height * s) / 2;
+        t.x = Math.round(t.align === 'left' ? bx : t.align === 'right' ? bx + L.width * s - t.width : cx - t.width / 2);
+        t.y = Math.round(cy - t.height / 2);
+        if (L.blend !== 'normal') t.blend = L.blend;
+        if (L.group) t.group = L.group;
+        const missing = !T.font.known && !fontAvailable(T.font.name);
+        if (missing) {
+          missingFonts.add(T.font.name);
+          // keep Photoshop's picture of the words too (hidden), in case the font can't be found
+          const key = 'img-' + nextImg++;
+          images.set(key, L.canvas);
+          const pic = {
+            id: 'layer-' + nextId++, type: 'image', img: key, name: L.name + ' (original look)',
+            x: bx, y: by, width: L.width * s, height: L.height * s, opacity: L.opacity, visible: false, adjust: defaultAdjust(),
+          };
+          if (L.group) pic.group = L.group;
+          made.push(pic);
+        }
+        made.push(t);
+        continue;
+      }
       const key = 'img-' + nextImg++;
       images.set(key, L.canvas);
       const l = {
         id: 'layer-' + nextId++, type: 'image', img: key, name: L.name,
-        x: X(L.left + (moved.get(L.ab) || [0, 0])[0]), y: Y(L.top + (moved.get(L.ab) || [0, 0])[1]), width: L.width * s, height: L.height * s,
+        x: bx, y: by, width: L.width * s, height: L.height * s,
         opacity: L.opacity, visible: L.visible, adjust: defaultAdjust(),
       };
       if (L.blend !== 'normal') l.blend = L.blend;
@@ -5672,6 +5869,9 @@
     if (s < 1) notes.push('made smaller to fit');
     if (psd.skipped) notes.push(psd.skipped + ' empty or adjustment layer' + (psd.skipped > 1 ? 's' : '') + ' left out');
     if (psd.layers.some((L) => L.clipped)) notes.push('clipping masks are not supported yet');
+    const kept = psd.layers.filter((L) => L.typeKept).length;
+    if (kept) notes.push(kept + ' text layer' + (kept > 1 ? 's' : '') + ' with mixed styles or bending kept as pictures');
+    if (missingFonts.size) notes.push('fonts not on this computer: ' + [...missingFonts].join(', ') + '. Add them in the font list; a hidden "original look" picture is kept under each of those texts');
     toast('Opened "' + name + '"' + (notes.length ? ' (' + notes.join('; ') + ')' : '') + '.');
   }
 
