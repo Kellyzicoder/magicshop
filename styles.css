@@ -1127,3 +1127,14 @@ select[hidden] { display: none; }
 .anchor-grid { display: grid; grid-template-columns: repeat(3, 26px); gap: 3px; }
 .anchor-cell { width: 26px; height: 26px; padding: 0; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); cursor: pointer; }
 .anchor-cell.on { background: var(--accent); border-color: var(--accent); }
+
+/* ---------- Keyboard shortcuts window ---------- */
+.keys-form { width: min(520px, 94vw); }
+.keys-list { max-height: min(56vh, 520px); overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; }
+.keys-head { margin: 10px 0 4px; font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.keys-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 3px 0; }
+.keys-label { font-size: 13px; }
+.keys-btn { min-width: 120px; padding: 4px 10px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface); color: var(--text); font-size: 12px; cursor: pointer; text-align: center; }
+.keys-btn.changed { border-color: var(--accent); }
+.keys-btn.listening { background: var(--accent); color: var(--accent-contrast); }
+.keys-note:empty { display: none; }
