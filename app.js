@@ -6941,6 +6941,8 @@
       ['Export as JPG', '', () => exportAs('jpeg')],
     ]],
     ['Edit', [
+      ['Keyboard Shortcuts…', 'Ctrl+Alt+Shift+K', () => openKeysDialog()],
+      '-',
       ['Undo', 'Ctrl+Z', () => undo(), () => undoStack.length > 0],
       ['Redo', 'Ctrl+Shift+Z', () => redo(), () => redoStack.length > 0],
       '-',
@@ -7009,6 +7011,33 @@
     ]],
   ];
 
+  // Commands that are not in a menu but still have a shortcut you can change.
+  const brushTool = () => (tool === 'brush' || tool === 'eraser' ? brushOpts[tool] : tool === 'quicksel' ? qsOpts : null);
+  function brushSize(dir) {
+    const o = brushTool();
+    if (!o) return;
+    const v = o.size;
+    // like Photoshop: small steps for small brushes, bigger steps for big ones
+    const step = v < 10 ? 1 : v < 50 ? 5 : v < 100 ? 10 : v < 300 ? 25 : 50;
+    o.size = clamp(dir > 0 ? v + step : v - step, 1, 1000);
+    renderToolOptions();
+    render();
+  }
+  function brushHardness(dir) {
+    const o = tool === 'brush' || tool === 'eraser' ? brushOpts[tool] : null;
+    if (!o) return;
+    o.hardness = clamp(o.hardness + dir * 25, 0, 100);
+    renderToolOptions();
+  }
+  const EXTRA_COMMANDS = ['Painting', [
+    ['Brush smaller', '[', () => brushSize(-1)],
+    ['Brush bigger', ']', () => brushSize(1)],
+    ['Brush softer', 'Shift+[', () => brushHardness(-1)],
+    ['Brush harder', 'Shift+]', () => brushHardness(1)],
+    ['Default colours (black and white)', 'D', () => resetColors()],
+    ['Swap colours', 'X', () => swapColors()],
+  ]];
+
   // "Ctrl+Shift+]" -> what to show on screen (⌘⇧] on a Mac)
   function keyLabel(k) {
     if (!k) return '';
@@ -7025,16 +7054,187 @@
     return (e.ctrlKey || e.metaKey ? 'Ctrl+' : '') + (e.altKey ? 'Alt+' : '') + (e.shiftKey ? 'Shift+' : '') + k;
   }
 
-  const shortcutMap = new Map();
-  for (const [, items] of MENUS) {
-    for (const it of items) {
-      if (it === '-' || !it[1] || it[1] === 'Delete') continue; // Delete is already handled by the main key handler
-      // store with modifiers in one fixed order: Ctrl, Alt, Shift
-      const parts = it[1].split('+');
-      const key = parts.pop() || '+';
-      const norm = (parts.includes('Ctrl') ? 'Ctrl+' : '') + (parts.includes('Alt') ? 'Alt+' : '') + (parts.includes('Shift') ? 'Shift+' : '') + (key.length === 1 ? key.toUpperCase() : key);
-      shortcutMap.set(norm, it);
+  // ----- Shortcuts: Photoshop's by default, and each one can be changed -----
+  // Saved in this browser as { tools: { brush: 'B' }, cmds: { 'Edit/Free Transform': 'Ctrl+T' } }.
+  // A tool's key is one key; Shift + that key steps through tools sharing it.
+  const DEFAULT_TOOL_KEYS = {
+    select: 'V', artboard: 'V', warp: '', marquee: 'M', quicksel: 'W', wand: 'W', crop: 'C', eyedropper: 'I',
+    brush: 'B', eraser: 'E', cutout: 'E', gradient: 'G', bucket: 'G', pen: 'P', text: 'T', shape: 'U', hand: 'H',
+  };
+  const normKey = (k) => {
+    if (!k) return '';
+    const parts = k.split('+');
+    let key = parts.pop() || '+';
+    if (key === '') key = '+';
+    return (parts.includes('Ctrl') ? 'Ctrl+' : '') + (parts.includes('Alt') ? 'Alt+' : '') + (parts.includes('Shift') ? 'Shift+' : '') + (key.length === 1 ? key.toUpperCase() : key);
+  };
+  const allCommands = () => {
+    const out = [];
+    for (const [menu, items] of [...MENUS, EXTRA_COMMANDS]) {
+      for (const it of items) if (it !== '-') out.push({ id: menu + '/' + it[0], menu, it, def: normKey(it[1]) });
     }
+    return out;
+  };
+  let customKeys = { tools: {}, cmds: {} };
+  try {
+    const saved = JSON.parse(localStorage.getItem('magicshop-shortcuts') || 'null');
+    if (saved && typeof saved === 'object') customKeys = { tools: saved.tools || {}, cmds: saved.cmds || {} };
+  } catch { /* no storage: use the defaults */ }
+  const saveKeys = () => { try { localStorage.setItem('magicshop-shortcuts', JSON.stringify(customKeys)); } catch { /* not saved */ } };
+  const toolKey = (t) => (t in customKeys.tools ? customKeys.tools[t] : DEFAULT_TOOL_KEYS[t] || '');
+  const cmdKey = (c) => (c.id in customKeys.cmds ? customKeys.cmds[c.id] : c.def);
+
+  const shortcutMap = new Map();
+  const cmdKeyOf = new Map(); // menu item -> its current key, for showing in the menus
+  function rebuildShortcuts() {
+    shortcutMap.clear();
+    cmdKeyOf.clear();
+    for (const c of allCommands()) {
+      const k = cmdKey(c);
+      cmdKeyOf.set(c.it, k);
+      if (!k || k === 'Delete') continue; // Delete is already handled by the main key handler
+      shortcutMap.set(k, c.it);
+    }
+    // tool buttons show their key in the tooltip, like "Brush (B)"
+    document.querySelectorAll('.rail-btn[data-tool]').forEach((b) => {
+      if (!b.dataset.name) b.dataset.name = b.title.replace(/\s*\(.*\)\s*$/, '');
+      const k = toolKey(b.dataset.tool);
+      b.title = b.dataset.name + (k ? ' (' + k + (b.dataset.tool === 'hand' ? ', or hold Space' : '') + ')' : b.dataset.tool === 'hand' ? ' (hold Space)' : '');
+    });
+  }
+  rebuildShortcuts();
+
+  // ----- Keyboard Shortcuts window (Edit > Keyboard Shortcuts…) -----
+  const TOOL_NAMES = {
+    select: 'Move / Select', artboard: 'Artboard', warp: 'Skew / Perspective / Distort', marquee: 'Area selection (Marquee)',
+    quicksel: 'Quick Selection', wand: 'Magic Wand', crop: 'Crop', eyedropper: 'Eyedropper', brush: 'Brush', eraser: 'Eraser',
+    cutout: 'Remove Background', gradient: 'Gradient', bucket: 'Paint Bucket', pen: 'Pen', text: 'Text', shape: 'Shapes', hand: 'Hand (pan)',
+  };
+  let keysDialog = null;
+
+  function openKeysDialog() {
+    if (!keysDialog) {
+      keysDialog = document.createElement('dialog');
+      keysDialog.id = 'keys-dialog';
+      document.body.append(keysDialog);
+      keysDialog.addEventListener('keydown', onKeysDialogKey);
+      keysDialog.addEventListener('close', () => { listening = null; });
+    }
+    renderKeysDialog();
+    keysDialog.showModal();
+  }
+
+  let listening = null; // { kind: 'tool' | 'cmd', id, btn }
+  let keysNote = '';
+
+  function renderKeysDialog() {
+    const d = keysDialog;
+    const scrollTop = d.querySelector('.keys-list') ? d.querySelector('.keys-list').scrollTop : 0;
+    d.replaceChildren();
+    const form = el('div', 'new-form keys-form');
+    form.append(el('h3', '', 'Keyboard shortcuts'));
+    form.append(el('p', 'font-note', 'Click a shortcut, then press the new keys. Backspace removes it, Esc stops. Tools use one key; Shift + that key switches between tools that share it.'));
+    const list = el('div', 'keys-list');
+    const row = (label, value, isDefault, onClick) => {
+      const r = el('div', 'keys-row');
+      const b = el('button', 'keys-btn' + (isDefault ? '' : ' changed'), value ? keyLabel(value) : '—');
+      b.type = 'button';
+      b.addEventListener('click', () => onClick(b));
+      r.append(el('span', 'keys-label', label), b);
+      return r;
+    };
+    list.append(el('div', 'keys-head', 'Tools'));
+    for (const t of Object.keys(DEFAULT_TOOL_KEYS)) {
+      list.append(row(TOOL_NAMES[t] || t, toolKey(t), !(t in customKeys.tools), (b) => startListening({ kind: 'tool', id: t, btn: b })));
+    }
+    let lastMenu = '';
+    for (const c of allCommands()) {
+      if (c.menu !== lastMenu) { lastMenu = c.menu; list.append(el('div', 'keys-head', c.menu)); }
+      list.append(row(c.it[0], cmdKey(c), !(c.id in customKeys.cmds), (b) => startListening({ kind: 'cmd', id: c.id, btn: b })));
+    }
+    form.append(list);
+    const note = el('p', 'font-note keys-note', keysNote);
+    form.append(note);
+    const actions = el('div', 'dialog-actions');
+    const reset = el('button', 'btn', 'Reset to Photoshop defaults');
+    reset.type = 'button';
+    reset.addEventListener('click', () => {
+      customKeys = { tools: {}, cmds: {} };
+      saveKeys();
+      rebuildShortcuts();
+      keysNote = 'All shortcuts are back to the defaults.';
+      renderKeysDialog();
+    });
+    const done = el('button', 'btn btn-primary', 'Done');
+    done.type = 'button';
+    done.addEventListener('click', () => keysDialog.close());
+    actions.append(done, reset);
+    form.append(actions);
+    form.append(el('p', 'font-note', 'In a web browser, ' + keyLabel('Ctrl+N') + ', ' + keyLabel('Ctrl+T') + ' and ' + keyLabel('Ctrl+W') + ' always go to the browser. They work in the desktop app.'));
+    d.append(form);
+    list.scrollTop = scrollTop;
+  }
+
+  function startListening(target) {
+    if (listening && listening.btn) listening.btn.classList.remove('listening');
+    listening = target;
+    target.btn.classList.add('listening');
+    target.btn.textContent = 'Press keys…';
+  }
+
+  function setBinding(kind, id, value) {
+    const msgs = [];
+    const label = (k, i) => (k === 'tool' ? TOOL_NAMES[i] : i.split('/')[1]);
+    if (value) {
+      // a key can only do one thing (tools may share a key with each other)
+      for (const c of allCommands()) {
+        if (!(kind === 'cmd' && c.id === id) && cmdKey(c) === value) { customKeys.cmds[c.id] = ''; msgs.push(label('cmd', c.id)); }
+      }
+      if (kind === 'cmd') {
+        for (const t of Object.keys(DEFAULT_TOOL_KEYS)) {
+          if (toolKey(t) && normKey(toolKey(t)) === value) { customKeys.tools[t] = ''; msgs.push(label('tool', t)); }
+        }
+      }
+    }
+    if (kind === 'tool') {
+      if (value === DEFAULT_TOOL_KEYS[id]) delete customKeys.tools[id];
+      else customKeys.tools[id] = value;
+    } else {
+      const c = allCommands().find((x) => x.id === id);
+      if (c && value === c.def) delete customKeys.cmds[id];
+      else customKeys.cmds[id] = value;
+    }
+    saveKeys();
+    rebuildShortcuts();
+    keysNote = msgs.length ? keyLabel(value) + ' was taken from: ' + msgs.join(', ') + '.' : '';
+  }
+
+  function onKeysDialogKey(e) {
+    if (!listening) return;
+    if (['Shift', 'Control', 'Alt', 'Meta', 'CapsLock'].includes(e.key)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const target = listening;
+    listening = null;
+    if (e.key === 'Escape') { renderKeysDialog(); return; }
+    if (e.key === 'Backspace' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+      setBinding(target.kind, target.id, '');
+      renderKeysDialog();
+      return;
+    }
+    const combo = pressedKey(e);
+    if (target.kind === 'tool') {
+      const plain = combo.replace(/^Shift\+/, '');
+      if (plain.includes('+') || plain.length !== 1) {
+        keysNote = 'A tool needs a single key (a letter or number), without Ctrl or Alt.';
+        renderKeysDialog();
+        return;
+      }
+      setBinding('tool', target.id, plain);
+    } else {
+      setBinding('cmd', target.id, combo);
+    }
+    renderKeysDialog();
   }
 
   const menubar = el('nav', 'menubar');
@@ -7060,7 +7260,7 @@
       const b = el('button', 'menu-item');
       b.type = 'button';
       b.disabled = ok ? !ok() : false;
-      b.append(el('span', 'menu-label', label), el('span', 'menu-key', keyLabel(keys)));
+      b.append(el('span', 'menu-label', label), el('span', 'menu-key', keyLabel(cmdKeyOf.has(it) ? cmdKeyOf.get(it) : keys)));
       b.addEventListener('click', () => { closeMenu(); run(); });
       menuPop.append(b);
     }
@@ -7146,7 +7346,7 @@
 
   // ---------- Keyboard ----------
 
-  const TOOL_KEYS = { v: 'select', m: 'marquee', c: 'crop', t: 'text', u: 'shape', p: 'pen', b: 'brush', e: 'eraser', k: 'bucket', g: 'gradient', i: 'eyedropper', h: 'hand', a: 'artboard', w: 'wand' };
+  const toolsForKey = (key) => (key.length === 1 ? Object.keys(DEFAULT_TOOL_KEYS).filter((t) => toolKey(t).toLowerCase() === key) : []);
 
   document.addEventListener('keydown', (e) => {
     if (document.querySelector('dialog[open]')) return;
@@ -7213,29 +7413,25 @@
           l.y += dy;
         }
       });
-    } else if (key === ']') {
-      zoomBy(1.25);
-    } else if (key === '[') {
-      zoomBy(0.8);
-    } else if (key === '0') {
+    } else if (key === '0' && !e.shiftKey && !e.altKey) {
       fitToScreen();
       render();
       drawRulers();
-    } else if (key === 'd' && !e.shiftKey && !e.altKey) {
-      resetColors();
-    } else if (key === 'x' && !e.shiftKey && !e.altKey) {
-      swapColors();
-    } else if (TOOL_KEYS[key]) {
-      if (TOOL_KEYS[key] === 'artboard' && !isMulti()) {
-        toast('Make a new file with “Artboards” ticked to use artboards.');
+    } else if (!e.altKey && toolsForKey(key).length) {
+      // the tools that use this key, leaving out hidden ones (Artboard in a one-page file)
+      const list = toolsForKey(key).filter((t) => !document.querySelector('.rail-btn[data-tool="' + t + '"]').hidden);
+      if (!list.length) {
+        if (toolsForKey(key).includes('artboard')) toast('Make a new file with “Artboards” ticked to use artboards.');
         return;
       }
-      let next = TOOL_KEYS[key];
-      // Shift + the letter steps through the tools that share a button (like Photoshop)
-      const g = e.shiftKey && groupOf[next];
-      if (g && g.tools.includes(tool)) {
-        const list = g.tools.filter((t) => !document.querySelector('.rail-btn[data-tool="' + t + '"]').hidden);
-        next = list[(list.indexOf(tool) + 1) % list.length];
+      let next;
+      if (e.shiftKey && list.includes(tool)) {
+        next = list[(list.indexOf(tool) + 1) % list.length]; // Shift + the key steps through them (like Photoshop)
+      } else if (list.includes(tool)) {
+        next = tool;
+      } else {
+        // the one showing on its tool button (the last one used), else the first
+        next = list.find((t) => !document.querySelector('.rail-btn[data-tool="' + t + '"]').classList.contains('g-off')) || list[0];
       }
       setTool(next);
     }
