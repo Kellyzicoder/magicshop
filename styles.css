@@ -1150,3 +1150,47 @@ select[hidden] { display: none; }
 .keys-btn.changed { border-color: var(--accent); }
 .keys-btn.listening { background: var(--accent); color: var(--accent-contrast); }
 .keys-note:empty { display: none; }
+
+/* ---------- Compact sizes (closer to Photoshop's tight layout) ---------- */
+body { font-size: 12.5px; }
+.app { grid-template-columns: 46px minmax(0, 1fr) 280px; }
+.topbar { gap: 10px; padding: 4px 10px; }
+.brand { font-size: 13px; gap: 8px; }
+.brand-mark { width: 24px; height: 24px; }
+.brand-mark .ic { width: 15px; height: 15px; }
+.menu-btn { padding: 4px 7px; font-size: 12.5px; }
+.menu-item { padding: 4px 10px; font-size: 12.5px; }
+.btn, select { gap: 6px; padding: 4px 10px; font-size: 12.5px; }
+select { padding-right: 28px; background-position: right 9px center; }
+.btn .ic { width: 15px; height: 15px; }
+.btn-icon { width: 28px; height: 26px; padding: 0; justify-content: center; }
+.chip { padding: 3px 8px; font-size: 12px; }
+.rail { gap: 2px; padding: 6px 0; }
+.rail-btn { width: 34px; height: 34px; border-radius: 6px; }
+.rail-btn .ic { width: 18px; height: 18px; }
+.rail-divider { width: 22px; margin: 3px 0; }
+.rail-colors { width: 34px; height: 40px; }
+.rail-colors .sw { width: 18px; height: 18px; }
+.rail-colors .sw-bg { left: 14px; top: 14px; }
+.rail-colors .sw-fg { left: 2px; top: 2px; }
+.tool-options { top: 8px; gap: 6px 8px; padding: 4px 10px; font-size: 12px; }
+.tool-options input[type="number"] { width: 58px; }
+.float-bar { gap: 4px; }
+.zoom-pill { bottom: 10px; gap: 6px; padding: 4px 8px; }
+.panel .tabs { margin: 6px 8px 4px; padding: 3px; }
+.tab { padding: 4px 6px; font-size: 12px; }
+.layer-list { padding: 4px 6px; }
+.layer { gap: 4px; padding: 2px 4px; }
+.layer .thumb { width: 30px; height: 30px; border-radius: 4px; }
+.layer .icon-btn { width: 22px; height: 22px; }
+.layer .icon-btn .ic { width: 14px; height: 14px; }
+.layer .mask-thumb { width: 30px; height: 30px; }
+.layer-head { padding: 2px 10px; gap: 2px; }
+.mask-row { padding: 4px 10px 2px; gap: 4px; }
+.btn-small { padding: 3px 8px; font-size: 12px; }
+.layer-foot { padding: 3px 8px; }
+.lf-btn { width: 26px; height: 26px; }
+.raw-body { padding: 0 12px 6px; }
+.raw-foot { padding: 8px 12px 10px; gap: 6px; }
+.raw-head { padding: 4px 12px 6px; }
+.field { padding: 2px 0; }
