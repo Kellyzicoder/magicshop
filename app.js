@@ -5801,10 +5801,100 @@
     st = st.replace(/italic|oblique/, '');
     let weight = 400;
     for (const [w, n] of PS_WEIGHTS) if (st === w || st.startsWith(w)) { weight = n; break; }
-    const spaced = base.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/(MT|PS|Std|Pro)+$/, '').trim();
+    const full = base.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/(PSMT|MT|PS)$/, '').replace(/([a-z])(Pro|Std)$/, '$1 $2').trim();
+    const spaced = full.replace(/\s*(Pro|Std)$/, '').trim();
     const key = (t) => t.toLowerCase().replace(/[^a-z0-9]/g, '');
     const known = FONTS.find((f) => key(f.name) === key(base) || key(f.name) === key(spaced));
-    return { family: known ? known.family : '"' + spaced + '", sans-serif', name: known ? known.name : spaced, weight, italic, known: !!known };
+    return { family: known ? known.family : '"' + spaced + '", sans-serif', name: known ? known.name : spaced, full, weight, italic, known: !!known };
+  }
+
+  // ----- Getting the fonts a Photoshop file uses -----
+  // 1. the font is already here (on this computer or in MagicShop's list): use it
+  // 2. it is a free Google font: download it (needs internet)
+  // 3. it is a paid font (often from Adobe): use the closest free look-alike, and fit the
+  //    words into the space Photoshop gave them, so the layout stays the same
+  // 4. nothing close: show Photoshop's picture of the words, with the text kept (hidden) to edit
+  const FONT_SUBS = {
+    myriad: 'Source Sans 3', myriadpro: 'Source Sans 3', minion: 'Crimson Pro', minionpro: 'Crimson Pro',
+    helvetica: 'Inter', helveticaneue: 'Inter', arial: 'Arimo', futura: 'Jost', futurapt: 'Jost', gotham: 'Montserrat',
+    proximanova: 'Montserrat', proximasera: 'Playfair Display', avenir: 'Nunito Sans', avenirnext: 'Nunito Sans',
+    brandongrotesque: 'Josefin Sans', trajan: 'Cinzel', trajanpro: 'Cinzel', garamond: 'EB Garamond', adobegaramond: 'EB Garamond',
+    adobegaramondpro: 'EB Garamond', gillsans: 'Lato', din: 'Barlow', dinpro: 'Barlow', dinnext: 'Barlow', metrisch: 'Manrope',
+    canela: 'Playfair Display', canelatext: 'Playfair Display', bodoni: 'Libre Bodoni', timesnewroman: 'Tinos', times: 'Tinos',
+    sfprodisplay: 'Inter', sfpro: 'Inter', sfprotext: 'Inter', segoeui: 'Open Sans', calibri: 'Carlito', cambria: 'Caladea',
+    georgia: 'Gelasio', impact: 'Anton', bebasneuepro: 'Bebas Neue', acuminpro: 'Archivo', acuminvariableconcept: 'Archivo',
+    museosans: 'Nunito Sans', sofiapro: 'Mulish', circularstd: 'DM Sans', graphik: 'Inter', akzidenzgrotesk: 'Inter',
+  };
+  const fontKey = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const googleFonts = new Map();
+
+  // Downloads a font family from Google Fonts. Resolves to true when it is ready to use.
+  function loadGoogleFont(family) {
+    if (!googleFonts.has(family)) {
+      const tryOne = (spec) => new Promise((resolve) => {
+        const link = document.createElement('link');
+        link.rel = 'stylesheet';
+        link.href = 'https://fonts.googleapis.com/css2?family=' + encodeURIComponent(family).replace(/%20/g, '+') + spec + '&display=swap';
+        const timer = setTimeout(() => { link.remove(); resolve(false); }, 6000);
+        link.onload = () => { clearTimeout(timer); resolve(true); };
+        link.onerror = () => { clearTimeout(timer); link.remove(); resolve(false); };
+        document.head.append(link);
+      });
+      googleFonts.set(family, (async () => {
+        // newer "variable" fonts first (every weight), then older ones with fixed weights
+        for (const spec of [':ital,wght@0,100..900;1,100..900', ':wght@100..900', ':ital,wght@0,400;0,700;1,400;1,700', ':wght@400;700', '']) {
+          if (await tryOne(spec)) {
+            try { await Promise.all([400, 700].map((w) => document.fonts.load(w + ' 40px "' + family + '"'))); } catch { /* still try to use it */ }
+            return fontAvailable(family);
+          }
+        }
+        return false;
+      })());
+    }
+    return googleFonts.get(family);
+  }
+
+  async function resolvePsdFont(f) {
+    if (f.known) return { family: f.family, how: 'real', name: f.name };
+    const names = [...new Set([f.full, f.name].filter(Boolean))];
+    for (const n of names) if (fontAvailable(n)) return { family: '"' + n + '", sans-serif', how: 'real', name: n };
+    for (const n of names) if (await loadGoogleFont(n)) return { family: '"' + n + '", sans-serif', how: 'real', name: n };
+    const sub = FONT_SUBS[fontKey(f.full)] || FONT_SUBS[fontKey(f.name)];
+    if (sub && (fontAvailable(sub) || (await loadGoogleFont(sub)))) return { family: '"' + sub + '", sans-serif', how: 'substitute', name: f.name, sub };
+    return { family: f.family, how: 'none', name: f.name };
+  }
+
+  // Where the letters of a text layer really are (without the empty space around them).
+  function textInk(t) {
+    const pad = Math.ceil(t.size) + 4;
+    const W = Math.ceil(t.width) + pad * 2, H = Math.ceil(t.height) + pad * 2;
+    if (W < 1 || H < 1 || W * H > 25e6) return null;
+    const c = document.createElement('canvas');
+    c.width = W;
+    c.height = H;
+    const g = c.getContext('2d', { willReadFrequently: true });
+    g.translate(pad - t.x, pad - t.y);
+    drawText(g, { ...t, color: '#000', runs: t.runs && t.runs.map((r) => ({ ...r, color: '#000' })) });
+    const d = g.getImageData(0, 0, W, H).data;
+    let x0 = W, y0 = H, x1 = -1, y1 = -1;
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        if (d[(y * W + x) * 4 + 3] > 40) {
+          if (x < x0) x0 = x;
+          if (x > x1) x1 = x;
+          if (y < y0) y0 = y;
+          if (y > y1) y1 = y;
+        }
+      }
+    }
+    if (x1 < 0) return null;
+    return { x: x0 - pad + t.x, y: y0 - pad + t.y, w: x1 - x0 + 1, h: y1 - y0 + 1 };
+  }
+
+  function scaleTextLayer(t, f) {
+    t.size = Math.max(1, Math.round(t.size * f * 10) / 10);
+    t.letterSpacing = Math.round((t.letterSpacing || 0) * f * 10) / 10;
+    if (t.runs) t.runs = t.runs.map((r) => (r.size ? { ...r, size: Math.max(1, Math.round(r.size * f * 10) / 10) } : r));
   }
 
   // true when the browser really has this font (not just the fallback)
@@ -5861,7 +5951,7 @@
       return {
         len: lens[k] || 0,
         font: f,
-        size: (s2.FontSize || st.FontSize || 12) * scale,
+        size: (s2.FontSize || st.FontSize || 12) * scale * (s2.VerticalScale || 1),
         weight: s2.FauxBold ? Math.min(900, f.weight + 200) : f.weight, // Photoshop's fake bold is a little heavier, not full bold
         italic: f.italic || !!s2.FauxItalic,
         color: c && c.length >= 4 ? '#' + hex(c[1]) + hex(c[2]) + hex(c[3]) : '#000000',
@@ -5877,7 +5967,7 @@
       warped,
       rotated: Math.abs(xy) > 1e-3 || Math.abs(yx) > 1e-3,
       font: psFont(fonts[st.Font || 0] && fonts[st.Font || 0].Name),
-      size: (st.FontSize || 12) * scale,
+      size: (st.FontSize || 12) * scale * (st.VerticalScale || 1),
       color: fc && fc.length >= 4 ? '#' + hex(fc[1]) + hex(fc[2]) + hex(fc[3]) : '#000000',
       align: props.Justification === 1 ? 'right' : props.Justification === 2 ? 'center' : 'left',
       tracking: st.Tracking || 0,
@@ -6289,16 +6379,29 @@
     marq = null;
     maskEditId = null;
     const made = [];
-    const missingFonts = new Set();
+    // find every font first (some may need downloading)
+    const fontPlan = new Map();
+    {
+      const want = new Map();
+      for (const L of psd.layers) {
+        if (!L.type) continue;
+        for (const f of [L.type.font, ...(L.type.runList || []).map((r) => r.font)]) if (f) want.set(f.full || f.name, f);
+      }
+      if (want.size) toast('Getting the fonts…');
+      await Promise.all([...want].map(async ([k, f]) => fontPlan.set(k, await resolvePsdFont(f))));
+    }
+    const planOf = (f) => fontPlan.get(f.full || f.name) || { family: f.family, how: 'none', name: f.name };
+    const subbed = new Set(), notFound = new Set();
     for (const L of psd.layers) {
       const bx = X(L.left + (moved.get(L.ab) || [0, 0])[0]), by = Y(L.top + (moved.get(L.ab) || [0, 0])[1]);
       if (L.type && !L.mask) {
         // real text: same words, font, size, colour and alignment, placed where Photoshop drew it
         const T = L.type;
+        const mainPlan = planOf(T.font);
         const t = {
           id: 'layer-' + nextId++, type: 'text', name: L.name, text: T.text,
           ...defaults.text,
-          font: T.font.family, size: Math.max(1, Math.round(T.size * s * 10) / 10),
+          font: mainPlan.family, size: Math.max(1, Math.round(T.size * s * 10) / 10),
           weight: T.bold ? Math.min(900, T.font.weight + 200) : T.font.weight, italic: T.font.italic || T.italic,
           color: T.color, align: T.align,
           letterSpacing: Math.round((T.tracking / 1000) * T.size * s * 10) / 10,
@@ -6306,10 +6409,17 @@
           underline: T.underline, strike: T.strike, caps: T.caps,
           x: 0, y: 0, width: 0, height: 0, opacity: L.opacity, visible: L.visible,
         };
+        let worst = mainPlan.how;
+        const note = (p) => {
+          if (p.how === 'substitute') subbed.add(p.name + ' → ' + p.sub);
+          if (p.how === 'none') notFound.add(p.name);
+          if (p.how === 'none' || (p.how === 'substitute' && worst === 'real')) worst = p.how;
+        };
+        note(mainPlan);
         if (T.mixed && T.runList.length > 1) {
           // the style used for the most letters becomes the layer's own; the others become runs
           const main = T.runList.reduce((a, b) => (b.len > a.len ? b : a));
-          t.font = main.font.family;
+          t.font = planOf(main.font).family;
           t.size = Math.max(1, Math.round(main.size * s * 10) / 10);
           t.weight = main.weight;
           t.italic = main.italic;
@@ -6318,45 +6428,68 @@
           t.strike = main.strike;
           t.runs = T.runList.map((rn) => {
             const o = { len: rn.len };
+            const p = planOf(rn.font);
+            note(p);
             const sz = Math.max(1, Math.round(rn.size * s * 10) / 10);
-            if (rn.font.family !== t.font) o.font = rn.font.family;
+            if (p.family !== t.font) o.font = p.family;
             if (sz !== t.size) o.size = sz;
             if (rn.weight !== t.weight) o.weight = rn.weight;
             if (rn.italic !== t.italic) o.italic = rn.italic;
             if (rn.color !== t.color) o.color = rn.color;
             if (rn.underline !== t.underline) o.underline = rn.underline;
             if (rn.strike !== t.strike) o.strike = rn.strike;
-            if (!rn.font.known && !fontAvailable(rn.font.name)) missingFonts.add(rn.font.name);
             return o;
           });
         }
         if (Math.abs(T.rotation) > 0.05) t.rotation = Math.round(T.rotation * 100) / 100;
         fitText(t);
-        const cx = bx + (L.width * s) / 2, cy = by + (L.height * s) / 2;
+        const box = { x: bx, y: by, w: L.width * s, h: L.height * s };
         if (t.rotation) {
           // a turned box spins around its middle, so put its middle where Photoshop's text was
-          t.x = Math.round(cx - t.width / 2);
-          t.y = Math.round(cy - t.height / 2);
-        }
-        if (!t.rotation) {
-          t.x = Math.round(t.align === 'left' ? bx : t.align === 'right' ? bx + L.width * s - t.width : cx - t.width / 2);
-          t.y = Math.round(cy - t.height / 2);
+          t.x = Math.round(box.x + box.w / 2 - t.width / 2);
+          t.y = Math.round(box.y + box.h / 2 - t.height / 2);
+        } else {
+          let ink = textInk(t);
+          if (ink && worst !== 'real' && ink.w > 4) {
+            // a look-alike font is wider or narrower: size the words to fill Photoshop's space
+            const f = clamp(box.w / ink.w, 0.5, 1.6);
+            if (Math.abs(f - 1) > 0.02) {
+              scaleTextLayer(t, f);
+              fitText(t);
+              ink = textInk(t);
+            }
+          }
+          if (ink) {
+            // put the letters exactly where Photoshop's letters were
+            t.x = Math.round(t.x + box.x + box.w / 2 - (ink.x + ink.w / 2));
+            t.y = Math.round(t.y + box.y + box.h / 2 - (ink.y + ink.h / 2));
+          } else {
+            t.x = Math.round(box.x + box.w / 2 - t.width / 2);
+            t.y = Math.round(box.y + box.h / 2 - t.height / 2);
+          }
         }
         if (L.blend !== 'normal') t.blend = L.blend;
         if (L.fx) t.fx = scaleFx(L.fx, s);
         if (L.group) t.group = L.group;
-        const missing = !T.font.known && !fontAvailable(T.font.name);
-        if (missing) {
-          missingFonts.add(T.font.name);
-          // keep Photoshop's picture of the words too (hidden), in case the font can't be found
+        if (worst !== 'real') {
+          // keep Photoshop's own picture of the words too. With no look-alike font it is the
+          // one that shows (the text stays underneath, hidden, ready to edit).
           const key = 'img-' + nextImg++;
           images.set(key, L.canvas);
           const pic = {
             id: 'layer-' + nextId++, type: 'image', img: key, name: L.name + ' (original look)',
-            x: bx, y: by, width: L.width * s, height: L.height * s, opacity: L.opacity, visible: false, adjust: defaultAdjust(),
+            x: bx, y: by, width: L.width * s, height: L.height * s, opacity: L.opacity,
+            visible: worst === 'none' && L.visible, adjust: defaultAdjust(),
           };
+          if (L.fx) pic.fx = scaleFx(L.fx, s);
           if (L.group) pic.group = L.group;
-          made.push(pic);
+          if (worst === 'none') {
+            t.visible = false;
+            made.push(t, pic);
+          } else {
+            made.push(pic, t);
+          }
+          continue;
         }
         made.push(t);
         continue;
@@ -6408,7 +6541,8 @@
     if (psd.layers.some((L) => L.clipped)) notes.push('clipping masks are not supported yet');
     const kept = psd.layers.filter((L) => L.typeKept).length;
     if (kept) notes.push(kept + ' bent (warped) text layer' + (kept > 1 ? 's' : '') + ' kept as pictures');
-    if (missingFonts.size) notes.push('fonts not on this computer: ' + [...missingFonts].join(', ') + '. Add them in the font list; a hidden "original look" picture is kept under each of those texts');
+    if (subbed.size) notes.push('look-alike fonts used: ' + [...subbed].join(', '));
+    if (notFound.size) notes.push('no match for ' + [...notFound].join(', ') + ', so those words show as Photoshop\'s picture (the editable text is hidden under it)');
     toast('Opened "' + name + '"' + (notes.length ? ' (' + notes.join('; ') + ')' : '') + '.');
   }
 
